@@ -58,6 +58,10 @@ const state = {
   run: { session: null, es: null, running: false },
   debug: null,
   term: { id: null, es: null, cwd: null, shell: null, starting: null, history: [], historyIndex: 0 },
+  clangd: {
+    id: null, root: null, status: 'stopped', es: null, starting: null,
+    versions: new Map(), opened: new Set(), diagnostics: new Map(), changeTimers: new Map(), missingReported: false,
+  },
   settings: { fontSize: 13, tabSize: 4, minimap: true, autoBrackets: true, theme: 'fullide' },
   expanded: new Set(),
   runConfig: { exe: '', args: '', cwd: '' },
@@ -179,11 +183,16 @@ const MENUS = {
     { id: 'lastedit', label: 'Last Edit Location', accel: 'Ctrl+Shift+Backspace' },
   ],
   code: [
-    { id: 'complete', label: 'Basic Completion', accel: 'Ctrl+Space' },
+    { id: 'complete', label: 'C++ IntelliSense Completion', accel: 'Ctrl+Space' },
+    { id: 'definition', label: 'Go to Definition', accel: 'F12' },
+    { id: 'rename-symbol', label: 'Rename Symbol', accel: 'F2' },
+    { id: 'quick-fix', label: 'Quick Fix', accel: 'Ctrl+.' },
+    { id: 'format-document', label: 'Format Document', accel: 'Ctrl+Alt+L' },
+    { id: 'show-hover', label: 'Show C++ Information', accel: 'Ctrl+Alt+I' },
+    { id: 'signature-help', label: 'Signature Help', accel: 'Ctrl+Shift+Space' },
     { id: 'comment', label: 'Comment with Line Comment', accel: 'Ctrl+/' },
     { id: 'duplicate', label: 'Duplicate Line', accel: 'Ctrl+D' },
     { id: 'newfile', label: 'New File from Template...', accel: 'Alt+Insert' },
-    { id: 'reformat', label: 'Reformat Code', accel: 'Ctrl+Alt+L' },
   ],
   build: [
     { id: 'build', label: 'Build Project', accel: 'Ctrl+F9' },
@@ -723,7 +732,10 @@ async function openFile(p) {
   if (data.binary) { logOut(p + ' is binary (' + data.size + ' bytes) — cannot edit', 'warn-text'); return; }
 
   const editor = new Editor($('editor-host'), {
-    onChange: (ed) => updateTabDirty(ed),
+    onChange: (ed) => {
+      updateTabDirty(ed);
+      queueClangdChange(ed);
+    },
     onCursor: (ed) => updateStatusBar(),
     onBreakpointToggle: (ed, line) => {
       ed.toggleBreakpoint(line);
@@ -735,6 +747,16 @@ async function openFile(p) {
   });
   editor.tabSize = state.settings.tabSize;
   editor.setValue(data.content, p);
+  editor.ta.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      { label: 'Go to Definition (F12)', fn: gotoDefinition },
+      { label: 'Rename Symbol (F2)', fn: renameSymbol },
+      { label: 'Quick Fix (Ctrl+.)', fn: codeActions },
+      { label: 'Format Document (Ctrl+Alt+L)', fn: formatDocument },
+      { label: 'Show C++ Info (Ctrl+Alt+I)', fn: showHover },
+    ]);
+  });
 
   const name = path.basename(p);
   const tab = document.createElement('div');
@@ -761,6 +783,11 @@ async function openFile(p) {
   switchTo(p);
   refreshStructure();
   $('welcome-screen').classList.add('hidden');
+  if (clangdLanguageId(p)) {
+    ensureClangd()
+      .then((ready) => ready && notifyClangdDocument('textDocument/didOpen', editor))
+      .catch((e) => logOut('clangd could not open ' + p + ': ' + e.message, 'err-text'));
+  }
 }
 
 function switchTo(p) {
@@ -782,6 +809,14 @@ function closeFile(p) {
   const f = state.files.get(p);
   if (!f) return;
   if (f.editor.isModified() && !confirmSave(p)) return;
+  cancelClangdChange(p);
+  if (f.editor.path && state.clangd.id) {
+    notifyClangdDocument('textDocument/didClose', f.editor).then(() => {
+      state.clangd.diagnostics.delete(f.editor.path);
+      applyDiagnostics();
+      updateProblemCounts();
+    }).catch((e) => logOut('clangd document close failed: ' + e.message, 'err-text'));
+  }
   f.editor.dispose();
   f.tab.remove();
   state.files.delete(p);
@@ -821,6 +856,8 @@ async function saveFile(p) {
   try {
     await api('POST', '/api/save', { path: f.editor.path, content: f.editor.getValue() });
     f.editor.markSaved();
+    notifyClangdDocument('textDocument/didSave', f.editor)
+      .catch((e) => logOut('clangd save notification failed: ' + e.message, 'err-text'));
     updateTabDirty(f.editor);
     updateStatusBar();
     logOut('Saved ' + f.editor.path);
@@ -836,6 +873,7 @@ function saveAll() {
 /* ---------------------------------------------------------------- status bar */
 
 function updateStatusBar() {
+  updateClangdStatus();
   const ed = activeEditor();
   if (!ed) {
     $('st-pos').textContent = '';
@@ -855,11 +893,444 @@ function activeEditor() {
 }
 
 function updateProblemCounts() {
-  const diags = state.build.diagnostics;
+  const diags = allDiagnostics();
   const errs = diags.filter((d) => d.severity === 'error').length;
   const warns = diags.filter((d) => d.severity === 'warning').length;
   $('st-errors').textContent = errs ? '✕ ' + errs : '';
   $('st-warnings').textContent = warns ? '⚠ ' + warns : '';
+}
+
+function clangdLanguageId(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.c') return 'c';
+  if (['.cc', '.cpp', '.cxx', '.c++', '.h', '.hh', '.hpp', '.hxx', '.h++'].includes(ext)) return 'cpp';
+  return null;
+}
+
+function clangdUri(filePath) {
+  const normalized = path.resolve(filePath).replace(/\\/g, '/');
+  return 'file:///' + normalized.split('/').map((part, index) =>
+    index === 0 && /^[A-Za-z]:$/.test(part) ? part : encodeURIComponent(part)).join('/');
+}
+
+function clangdPath(uri) {
+  const parsed = new URL(uri);
+  let value = decodeURIComponent(parsed.pathname);
+  if (/^\/[A-Za-z]:\//.test(value)) value = value.slice(1);
+  return value.replace(/\//g, '\\');
+}
+
+function updateClangdStatus() {
+  const el = $('st-clangd');
+  if (!el) return;
+  const status = state.clangd.status;
+  el.className = status === 'ready' ? 'ready' : (status === 'missing' || status === 'failed' ? status : '');
+  el.textContent = status === 'ready' ? 'clangd' :
+    (status === 'starting' ? 'clangd starting…' :
+      (status === 'missing' ? 'clangd unavailable' : (status === 'failed' ? 'clangd error' : 'clangd stopped')));
+  el.title = status === 'missing'
+    ? 'Install clangd and add clangd.exe to PATH, or configure FULLIDE_CLANGD before restarting FullIDE.'
+    : (state.clangd.root ? 'clangd: ' + status + ' — ' + state.clangd.root : 'clangd language server: ' + status);
+}
+
+async function stopClangd() {
+  const { id, es, changeTimers } = state.clangd;
+  for (const timer of changeTimers.values()) clearTimeout(timer);
+  changeTimers.clear();
+  if (es) es.close();
+  if (id) {
+    try { await api('POST', '/api/clangd/' + id + '/stop', {}); }
+    catch (e) { logOut('Could not stop clangd cleanly: ' + e.message, 'warn-text'); }
+  }
+  state.clangd.id = null;
+  state.clangd.es = null;
+  state.clangd.root = null;
+  state.clangd.status = state.tools.clangd ? 'stopped' : 'missing';
+  state.clangd.versions.clear();
+  state.clangd.opened.clear();
+  state.clangd.diagnostics.clear();
+  updateClangdStatus();
+}
+
+async function ensureClangd() {
+  if (!state.root) return false;
+  if (!state.tools.clangd) {
+    state.clangd.status = 'missing';
+    updateClangdStatus();
+    if (!state.clangd.missingReported) {
+      state.clangd.missingReported = true;
+      logOut('clangd was not detected. Install clangd.exe, add it to PATH (or set FULLIDE_CLANGD), then restart FullIDE to enable C/C++ IntelliSense.', 'warn-text');
+    }
+    return false;
+  }
+  if (state.clangd.id && state.clangd.root === state.root &&
+      (state.clangd.status === 'ready' || state.clangd.status === 'starting')) return true;
+  if (state.clangd.starting) {
+    await state.clangd.starting;
+    if (state.clangd.id && state.clangd.root === state.root) return true;
+  }
+  if (state.clangd.id || state.clangd.es) await stopClangd();
+
+  const root = state.root;
+  state.clangd.root = root;
+  state.clangd.status = 'starting';
+  updateClangdStatus();
+  state.clangd.starting = (async () => {
+    try {
+      const result = await api('POST', '/api/clangd/start', { root });
+      if (state.root !== root) {
+        await api('POST', '/api/clangd/' + result.id + '/stop', {}).catch(() => {});
+        return false;
+      }
+      state.clangd.id = result.id;
+      const es = new EventSource('/api/clangd/' + result.id + '/stream');
+      state.clangd.es = es;
+      es.addEventListener('message', (event) => {
+        if (state.clangd.id !== result.id) return;
+        let message;
+        try { message = JSON.parse(event.data); }
+        catch (e) { logOut('Invalid clangd event: ' + e.message, 'err-text'); return; }
+        if (message.type === 'status') {
+          state.clangd.status = message.status;
+          updateClangdStatus();
+          if (message.status === 'ready') {
+            for (const [, file] of state.files) notifyClangdDocument('textDocument/didOpen', file.editor).catch(() => {});
+          } else if (message.status === 'failed') {
+            logOut('clangd failed: ' + (message.message || 'unknown error'), 'err-text');
+          }
+        } else if (message.type === 'diagnostics') {
+          updateClangdDiagnostics(message.params);
+        } else if (message.type === 'log' && message.message && message.severity <= 1) {
+          logOut('clangd: ' + message.message, 'warn-text');
+        } else if (message.type === 'error') {
+          state.clangd.status = 'failed';
+          updateClangdStatus();
+          logOut('clangd protocol error: ' + message.message, 'err-text');
+        }
+      });
+      state.clangd.status = result.status;
+      updateClangdStatus();
+      return true;
+    } catch (e) {
+      if (state.root === root) {
+        state.clangd.status = 'failed';
+        updateClangdStatus();
+      }
+      logOut('Failed to start clangd: ' + e.message, 'err-text');
+      return false;
+    }
+  })();
+  try { return await state.clangd.starting; }
+  finally { state.clangd.starting = null; }
+}
+
+function updateClangdDiagnostics(params) {
+  let fp;
+  try { fp = clangdPath(params.uri); }
+  catch (e) { logOut('clangd sent an invalid diagnostic URI: ' + e.message, 'err-text'); return; }
+  if (params.diagnostics && params.diagnostics.length) {
+    state.clangd.diagnostics.set(fp, params.diagnostics.map((d) => ({
+      file: fp,
+      line: d.range.start.line + 1,
+      col: d.range.start.character + 1,
+      severity: ({ 1: 'error', 2: 'warning', 3: 'info', 4: 'hint' })[d.severity] || 'info',
+      message: d.message,
+      source: d.source || 'clangd',
+      code: d.code,
+      lspDiagnostic: d,
+    })));
+  } else {
+    state.clangd.diagnostics.delete(fp);
+  }
+  applyDiagnostics();
+  updateProblemCounts();
+}
+
+function allDiagnostics() {
+  return state.build.diagnostics.concat(...state.clangd.diagnostics.values());
+}
+
+function queueClangdChange(editor) {
+  if (!editor.path || !clangdLanguageId(editor.path) || !state.clangd.id) return;
+  cancelClangdChange(editor.path);
+  const timer = setTimeout(() => {
+    state.clangd.changeTimers.delete(editor.path);
+    notifyClangdDocument('textDocument/didChange', editor).catch((e) => {
+      logOut('clangd document sync failed: ' + e.message, 'err-text');
+    });
+  }, 120);
+  state.clangd.changeTimers.set(editor.path, timer);
+}
+
+function cancelClangdChange(filePath) {
+  const timer = state.clangd.changeTimers.get(filePath);
+  if (timer) clearTimeout(timer);
+  state.clangd.changeTimers.delete(filePath);
+}
+
+async function notifyClangdDocument(method, editor) {
+  const languageId = clangdLanguageId(editor.path);
+  if (!languageId || !state.root) return;
+  if (!state.clangd.id && !(await ensureClangd())) return;
+  const uri = clangdUri(editor.path);
+  if (method === 'textDocument/didOpen' && state.clangd.opened.has(uri)) return;
+  if (method === 'textDocument/didClose' && !state.clangd.opened.has(uri)) return;
+  const version = (state.clangd.versions.get(uri) || 0) + 1;
+  state.clangd.versions.set(uri, version);
+  const textDocument = { uri, version };
+  let params;
+  if (method === 'textDocument/didOpen') {
+    params = { textDocument: Object.assign(textDocument, { languageId, text: editor.getValue() }) };
+  } else if (method === 'textDocument/didChange') {
+    params = { textDocument, contentChanges: [{ text: editor.getValue() }] };
+  } else if (method === 'textDocument/didSave') {
+    params = { textDocument, text: editor.getValue() };
+  } else {
+    params = { textDocument: { uri } };
+  }
+  const sessionId = state.clangd.id;
+  if (method === 'textDocument/didOpen') state.clangd.opened.add(uri);
+  try {
+    await api('POST', '/api/clangd/' + sessionId + '/notify', { method, params });
+    if (method === 'textDocument/didClose') state.clangd.opened.delete(uri);
+  } catch (e) {
+    if (method === 'textDocument/didOpen') state.clangd.opened.delete(uri);
+    throw e;
+  }
+}
+
+function lspPosition(editor, index) {
+  const cursor = index === undefined ? editor.ta.selectionStart : index;
+  const before = editor.text.slice(0, cursor);
+  return { line: before.split('\n').length - 1, character: cursor - before.lastIndexOf('\n') - 1 };
+}
+
+function offsetAtPosition(text, position) {
+  const lines = text.split('\n');
+  const line = Math.max(0, Math.min(position.line, lines.length - 1));
+  let offset = 0;
+  for (let i = 0; i < line; i++) offset += lines[i].length + 1;
+  return offset + Math.min(position.character, lines[line].length);
+}
+
+async function clangdRequest(method, params) {
+  if (!(await ensureClangd()) || !state.clangd.id) return null;
+  try {
+    const response = await api('POST', '/api/clangd/' + state.clangd.id + '/request', { method, params });
+    return response.result;
+  } catch (e) {
+    logOut('clangd ' + method + ' failed: ' + e.message, 'err-text');
+    return null;
+  }
+}
+
+function applyTextEdits(editor, edits) {
+  if (!edits || !edits.length) return false;
+  const text = applyTextEditsToText(editor.getValue(), edits);
+  if (text === editor.getValue()) return false;
+  editor._replaceRange(0, editor.text.length, text);
+  return true;
+}
+
+function applyTextEditsToText(content, edits) {
+  const ordered = edits.map((edit) => ({
+    start: offsetAtPosition(content, edit.range.start),
+    end: offsetAtPosition(content, edit.range.end),
+    text: edit.newText,
+  })).sort((a, b) => b.start - a.start || b.end - a.end);
+  let text = content;
+  for (const edit of ordered) text = text.slice(0, edit.start) + edit.text + text.slice(edit.end);
+  return text;
+}
+
+function workspaceEditEntries(edit) {
+  const entries = [];
+  if (edit.changes) {
+    for (const [uri, edits] of Object.entries(edit.changes)) entries.push({ uri, edits });
+  }
+  for (const change of edit.documentChanges || []) {
+    if (change.textDocument && change.edits) entries.push({ uri: change.textDocument.uri, edits: change.edits });
+  }
+  return entries;
+}
+
+function isWorkspaceFile(filePath) {
+  if (!state.root) return false;
+  const candidate = path.resolve(filePath).toLowerCase();
+  const root = path.resolve(state.root).toLowerCase().replace(/[\\/]+$/, '');
+  return candidate === root || candidate.startsWith(root + '\\');
+}
+
+async function applyWorkspaceEdit(edit) {
+  const changes = workspaceEditEntries(edit);
+  const originalPath = state.active;
+  let applied = 0;
+  for (const change of changes) {
+    if (!change.uri || !change.uri.startsWith('file:') || !change.edits) continue;
+    const fp = path.resolve(clangdPath(change.uri));
+    if (!isWorkspaceFile(fp)) continue;
+    const normalizedPath = fp.toLowerCase();
+    let openPath = null;
+    for (const open of state.files.keys()) {
+      if (open.toLowerCase() === normalizedPath) { openPath = open; break; }
+    }
+    if (openPath) {
+      const file = state.files.get(openPath);
+      if (applyTextEdits(file.editor, change.edits)) applied++;
+      continue;
+    }
+    const data = await api('GET', '/api/file?path=' + encodeURIComponent(fp));
+    if (data.binary) throw new Error('clangd edit targets a binary file: ' + fp);
+    const content = data.content.replace(/\r\n?/g, '\n');
+    const updated = applyTextEditsToText(content, change.edits);
+    if (updated !== content) {
+      await api('POST', '/api/save', { path: fp, content: updated });
+      applied++;
+    }
+  }
+  if (originalPath && state.files.has(originalPath)) switchTo(originalPath);
+  return applied;
+}
+
+async function formatDocument() {
+  const editor = activeEditor();
+  if (!editor || !clangdLanguageId(editor.path)) return;
+  try {
+    const edits = await clangdRequest('textDocument/formatting', {
+      textDocument: { uri: clangdUri(editor.path) },
+      options: { tabSize: state.settings.tabSize, insertSpaces: true },
+    });
+    if (edits === null) return;
+    if (!applyTextEdits(editor, edits)) logOut('clangd found no formatting changes', 'ok-text');
+  } catch (e) { logOut('Could not format document: ' + e.message, 'err-text'); }
+}
+
+async function renameSymbol() {
+  const editor = activeEditor();
+  if (!editor || !clangdLanguageId(editor.path)) return;
+  const word = editor.wordAt();
+  if (!word) return;
+  let newName = '';
+  const accepted = await showModal('Rename Symbol', '<div class="field"><label>New name</label><input id="clangd-rename" value="' + esc(word.word) + '"></div>', [
+    { label: 'Cancel', value: false },
+    {
+      label: 'Preview Rename', primary: true,
+      validate: () => {
+        newName = $('clangd-rename').value.trim();
+        return /^[A-Za-z_]\w*$/.test(newName) && newName !== word.word;
+      },
+      value: true,
+    },
+  ]);
+  if (!accepted || activeEditor() !== editor) return;
+  const edit = await clangdRequest('textDocument/rename', {
+    textDocument: { uri: clangdUri(editor.path) },
+    position: lspPosition(editor),
+    newName,
+  });
+  if (!edit) return;
+  const targets = workspaceEditEntries(edit).filter((entry) =>
+    entry.uri.startsWith('file:') && isWorkspaceFile(clangdPath(entry.uri)));
+  if (!targets.length) {
+    logOut('clangd found no references to rename.', 'warn-text');
+    return;
+  }
+  const names = [...new Set(targets.map((entry) => clangdPath(entry.uri)))];
+  const confirmed = await showModal('Confirm Rename', '<div>Rename <b>' + esc(word.word) + '</b> to <b>' + esc(newName) + '</b> in ' + targets.length + ' file(s)?</div><div style="margin-top:8px;color:var(--fg-dim)">' + names.map(esc).join('<br>') + '</div>', [
+    { label: 'Cancel', value: false },
+    { label: 'Apply Rename', primary: true, value: true },
+  ]);
+  if (!confirmed) return;
+  try {
+    const count = await applyWorkspaceEdit(edit);
+    logOut('Renamed ' + word.word + ' to ' + newName + ' in ' + count + ' file(s). Review and save changed editor tabs.', 'ok-text');
+  } catch (e) {
+    logOut('Rename was only partially applied: ' + e.message, 'err-text');
+  }
+}
+
+async function codeActions() {
+  const editor = activeEditor();
+  if (!editor || !clangdLanguageId(editor.path)) return;
+  const start = lspPosition(editor, editor.ta.selectionStart);
+  const end = lspPosition(editor, editor.ta.selectionEnd);
+  const lineText = editor.lineText(start.line + 1);
+  const range = start.line === end.line && start.character === end.character
+    ? { start: { line: start.line, character: 0 }, end: { line: start.line, character: lineText.length } }
+    : { start, end };
+  const diagnostics = (editor.diagnostics || []).map((d) => d.lspDiagnostic).filter((d) =>
+    d && d.range.start.line <= range.end.line && d.range.end.line >= range.start.line);
+  const actions = await clangdRequest('textDocument/codeAction', {
+    textDocument: { uri: clangdUri(editor.path) },
+    range,
+    context: { diagnostics, only: ['quickfix', 'refactor'] },
+  });
+  if (!actions || !actions.length) {
+    logOut('clangd did not offer a quick fix here', 'warn-text');
+    return;
+  }
+  showContextMenu(innerWidth / 2, innerHeight / 2, actions.slice(0, 12).map((item) => ({
+    label: item.title || 'Apply code action',
+    fn: async () => {
+      if (!item.edit) {
+        logOut('This clangd code action requires a command that FullIDE does not support yet.', 'warn-text');
+        return;
+      }
+      try {
+        const count = await applyWorkspaceEdit(item.edit);
+        logOut('Applied code action in ' + count + ' file(s). Review and save the changes.', 'ok-text');
+      } catch (e) {
+        logOut('Could not fully apply the code action: ' + e.message, 'err-text');
+      }
+    },
+  })));
+}
+
+async function showHover() {
+  const editor = activeEditor();
+  if (!editor || !clangdLanguageId(editor.path)) return;
+  const hover = await clangdRequest('textDocument/hover', {
+    textDocument: { uri: clangdUri(editor.path) },
+    position: lspPosition(editor),
+  });
+  if (!hover || !hover.contents) return;
+  const contents = Array.isArray(hover.contents) ? hover.contents.map((part) =>
+    typeof part === 'string' ? part : part.value || '').join('\n\n') :
+    (typeof hover.contents === 'string' ? hover.contents : hover.contents.value || '');
+  if (!contents) return;
+  showModal('C++ Information', '<pre style="white-space:pre-wrap;max-height:55vh;overflow:auto">' + esc(contents) + '</pre>', [
+    { label: 'Close', primary: true, value: null },
+  ]);
+}
+
+async function showSignatureHelp() {
+  const editor = activeEditor();
+  if (!editor || !clangdLanguageId(editor.path)) return;
+  const help = await clangdRequest('textDocument/signatureHelp', {
+    textDocument: { uri: clangdUri(editor.path) },
+    position: lspPosition(editor),
+    context: { triggerKind: 1, isRetrigger: false },
+  });
+  const signatures = help && help.signatures || [];
+  if (!signatures.length) {
+    logOut('clangd has no signature information at the cursor.', 'warn-text');
+    return;
+  }
+  const selected = Math.max(0, Math.min(help.activeSignature || 0, signatures.length - 1));
+  const signature = signatures[selected];
+  const docs = typeof signature.documentation === 'string'
+    ? signature.documentation
+    : signature.documentation && signature.documentation.value || '';
+  const label = typeof signature.label === 'string' ? signature.label : '';
+  const parameter = signature.activeParameter === undefined ? help.activeParameter : signature.activeParameter;
+  const parameterInfo = parameter !== undefined && signature.parameters && signature.parameters[parameter];
+  const detail = parameterInfo && (typeof parameterInfo.documentation === 'string'
+    ? parameterInfo.documentation
+    : parameterInfo.documentation && parameterInfo.documentation.value);
+  const content = [label, detail, docs].filter(Boolean).join('\n\n');
+  showModal('C++ Signature', '<pre style="white-space:pre-wrap;max-height:55vh;overflow:auto">' + esc(content) + '</pre>', [
+    { label: 'Close', primary: true, value: null },
+  ]);
 }
 
 /* ---------------------------------------------------------------- build */
@@ -904,7 +1375,7 @@ async function buildProject(rebuild) {
 
 function applyDiagnostics() {
   const byFile = new Map();
-  for (const d of state.build.diagnostics) {
+  for (const d of allDiagnostics()) {
     if (!d.file) continue;
     if (!byFile.has(d.file)) byFile.set(d.file, []);
     byFile.get(d.file).push(d);
@@ -918,7 +1389,7 @@ function applyDiagnostics() {
 function renderProblems() {
   const list = $('problems-list');
   list.innerHTML = '';
-  const diags = state.build.diagnostics;
+  const diags = allDiagnostics();
   if (!diags.length) {
     list.innerHTML = '<div style="padding:12px;color:var(--fg-dim)">No problems detected. Build the project (Ctrl+F9).</div>';
     return;
@@ -1782,12 +2253,34 @@ const STL_API = [
   'std::min', 'std::max', 'std::abs', 'std::sqrt', 'std::pow', 'std::sin', 'std::cos',
 ];
 
-function showAutocomplete(force) {
+async function showAutocomplete(force) {
   const ed = activeEditor();
   if (!ed) return;
   const { prefix, start, end } = ed.getWordPrefix();
   if (!force && prefix.length < 1) { hideAutocomplete(); return; }
-  const items = gatherCompletions(prefix);
+  const cursor = ed.ta.selectionStart;
+  const selectionEnd = ed.ta.selectionEnd;
+  const fallbackItems = gatherCompletions(prefix);
+  const languageId = clangdLanguageId(ed.path);
+  let languageItems = [];
+  if (languageId && state.root) {
+    const result = await clangdRequest('textDocument/completion', {
+      textDocument: { uri: clangdUri(ed.path) },
+      position: lspPosition(ed),
+      context: { triggerKind: force ? 1 : 2 },
+    });
+    const candidates = Array.isArray(result) ? result : (result && result.items) || [];
+    languageItems = candidates.filter((item) => item && item.label).map((item) => ({
+      ...item,
+      kind: item.kind || 1,
+      detail: item.detail || '',
+      languageServerItem: true,
+    }));
+  }
+  if (activeEditor() !== ed || ed.ta.selectionStart !== cursor || ed.ta.selectionEnd !== selectionEnd) return;
+  const merged = new Map(languageItems.map((item) => [item.label, item]));
+  for (const item of fallbackItems) if (!merged.has(item.label)) merged.set(item.label, item);
+  const items = [...merged.values()].slice(0, 80);
   if (!items.length) { hideAutocomplete(); return; }
   acState = { items, sel: 0, start, end, prefix };
   renderAutocomplete();
@@ -1804,8 +2297,20 @@ function renderAutocomplete() {
   acState.items.forEach((item, i) => {
     const div = document.createElement('div');
     div.className = 'ac-item' + (i === acState.sel ? ' sel' : '');
-    const kindLabels = { k: 'kw', f: 'fn', v: 'va', t: 'ty', s: 'sn' };
-    div.innerHTML = '<span class="ac-kind ' + (item.kind) + '">' + (kindLabels[item.kind] || '·') + '</span>' +
+    const kindLabels = {
+      k: 'kw', f: 'fn', v: 'va', t: 'ty', s: 'sn',
+      1: 'txt', 2: 'meth', 3: 'fn', 4: 'ctor', 5: 'fld', 6: 'var',
+      7: 'cls', 8: 'intf', 9: 'mod', 10: 'prop', 11: 'unit', 12: 'val',
+      13: 'enum', 14: 'kw', 15: 'snip', 16: 'color', 17: 'file', 18: 'ref',
+      19: 'fold', 20: 'enum', 21: 'const', 22: 'struct', 23: 'event',
+      24: 'op', 25: 'type',
+    };
+    const kindClasses = {
+      k: 'k', f: 'f', v: 'v', t: 't',
+      2: 'f', 3: 'f', 4: 't', 5: 'v', 6: 'v', 7: 't',
+      13: 't', 14: 'k', 15: 's', 21: 'v', 22: 't', 25: 't',
+    };
+    div.innerHTML = '<span class="ac-kind ' + (kindClasses[item.kind] || '') + '">' + esc(kindLabels[item.kind] || '·') + '</span>' +
       '<span>' + esc(item.label) + '</span>' +
       (item.detail ? '<span class="ac-detail">' + esc(item.detail) + '</span>' : '');
     div.addEventListener('mousedown', (e) => {
@@ -1820,13 +2325,65 @@ function renderAutocomplete() {
 function insertCompletion(item) {
   const ed = activeEditor();
   if (!ed || !acState) return;
-  let text = item.label;
-  if (item.kind === 's') {
-    const snip = Snippets.find((s) => s.trigger === item.label);
-    if (snip) text = snip.body.replace(/\$\d+/g, '').replace('$0', '');
+  const stateAtSelection = acState;
+  let replacement = item.textEdit && item.textEdit.newText || item.insertText || item.label;
+  let replaceStart = stateAtSelection.start, replaceEnd = stateAtSelection.end;
+  if (item.textEdit && (item.textEdit.range || item.textEdit.replace)) {
+    const range = item.textEdit.range || item.textEdit.replace;
+    replaceStart = offsetAtPosition(ed.text, range.start);
+    replaceEnd = offsetAtPosition(ed.text, range.end);
   }
-  ed._replaceRange(acState.start, acState.end, text);
+  let caretOffset = replacement.length;
+  if (item.insertTextFormat === 2) {
+    const snippet = materializeCompletionSnippet(replacement);
+    replacement = snippet.text;
+    caretOffset = snippet.cursor;
+  }
+  if (!item.languageServerItem && item.kind === 's') {
+    const snip = Snippets.find((s) => s.trigger === item.label);
+    if (snip) replacement = snip.body.replace(/\$\d+/g, '').replace('$0', '');
+  }
+  const primaryEdit = { start: replaceStart, end: replaceEnd, text: replacement };
+  const edits = [primaryEdit];
+  for (const edit of item.additionalTextEdits || []) {
+    edits.push({
+      start: offsetAtPosition(ed.text, edit.range.start),
+      end: offsetAtPosition(ed.text, edit.range.end),
+      text: edit.newText,
+    });
+  }
+  let updated = ed.text;
+  for (const edit of edits.slice().sort((a, b) => b.start - a.start || b.end - a.end)) {
+    updated = updated.slice(0, edit.start) + edit.text + updated.slice(edit.end);
+  }
+  const cursor = replaceStart + caretOffset + edits.slice(1)
+    .filter((edit) => edit.end <= replaceStart)
+    .reduce((delta, edit) => delta + edit.text.length - (edit.end - edit.start), 0);
+  ed._replaceRange(0, ed.text.length, updated);
+  ed.setCursor(Math.max(0, Math.min(cursor, updated.length)));
+  const historyItem = ed.history[ed.historyIndex];
+  if (historyItem) historyItem.selectionStart = historyItem.selectionEnd = ed.ta.selectionStart;
   hideAutocomplete();
+}
+
+function materializeCompletionSnippet(snippet) {
+  let text = '', cursor = null, match;
+  const token = /\$(\d+)|\$\{(\d+)(?::([^}]*))?\}/g;
+  let previous = 0;
+  while ((match = token.exec(snippet))) {
+    text += snippet.slice(previous, match.index);
+    const index = Number(match[1] || match[2]);
+    const value = match[3] || '';
+    if (index === 0) {
+      if (cursor === null) cursor = text.length;
+    } else if (cursor === null) {
+      cursor = text.length;
+    }
+    text += value;
+    previous = token.lastIndex;
+  }
+  text += snippet.slice(previous);
+  return { text, cursor: cursor === null ? text.length : cursor };
 }
 
 function hideAutocomplete() {
@@ -1885,6 +2442,9 @@ function bindKeyboard() {
 
     if (ctrl && shift && key === 'f') { e.preventDefault(); switchSidebarAndFocus('search'); return; }
     if (ctrl && shift && key === 'm') { e.preventDefault(); showSidebarView('problems'); return; }
+    if (ctrl && key === '.' && typingInEditor) { e.preventDefault(); codeActions(); return; }
+    if (ctrl && shift && e.code === 'Space' && typingInEditor) { e.preventDefault(); showSignatureHelp(); return; }
+    if (ctrl && alt && key === 'i' && typingInEditor) { e.preventDefault(); showHover(); return; }
     if (ctrl && shift && key === 'n') { e.preventDefault(); newProjectDialog(); return; }
     if (ctrl && alt && shift && key === 'n') { e.preventDefault(); newProjectDialog(); return; }
     if (ctrl && key === 'k') { e.preventDefault(); /* wait for second key */ bindSecondKey('o', () => openFolderBrowser(null, 'Open Folder', setRoot)); return; }
@@ -1904,14 +2464,14 @@ function bindKeyboard() {
     if (ctrl && key === 'd') { e.preventDefault(); duplicateLine(); return; }
     if (ctrl && shift && key === 'y') { e.preventDefault(); deleteLine(); return; }
     if (ctrl && key === '/') { e.preventDefault(); toggleComment(); return; }
-    if (ctrl && alt && key === 'l') { e.preventDefault(); logOut('Reformat: not implemented for C/C++ (use clang-format)'); return; }
+    if (ctrl && alt && key === 'l') { e.preventDefault(); formatDocument(); return; }
     if (e.key === 'F5') { e.preventDefault(); debugProject(); return; }
     if (e.key === 'F7') { e.preventDefault(); debugStep('into'); return; }
     if (e.key === 'F8') { e.preventDefault(); debugStep('over'); return; }
     if (e.key === 'F9') { e.preventDefault(); debugStep('resume'); return; }
     if (e.key === 'F10') { e.preventDefault(); debugStep('over'); return; }
     if (e.key === 'F12') { e.preventDefault(); gotoDefinition(); return; }
-    if (e.key === 'F2' && !ctrl) { e.preventDefault(); return; }
+    if (e.key === 'F2' && !ctrl) { e.preventDefault(); renameSymbol(); return; }
     if (e.key === 'Escape') {
       if (!$('autocomplete').classList.contains('hidden')) { hideAutocomplete(); return; }
       if (!$('findbar').classList.contains('hidden')) { hideFindBar(); return; }
@@ -2143,11 +2703,33 @@ function toggleComment() {
   }
 }
 
-function gotoDefinition() {
+async function gotoDefinition() {
   const ed = activeEditor();
   if (!ed) return;
   const w = ed.wordAt();
   if (!w) return;
+  if (clangdLanguageId(ed.path) && state.root) {
+    const definitions = await clangdRequest('textDocument/definition', {
+      textDocument: { uri: clangdUri(ed.path) },
+      position: lspPosition(ed),
+    });
+    const target = Array.isArray(definitions) ? definitions[0] : definitions;
+    if (target) {
+      const uri = target.targetUri || target.uri;
+      const range = target.targetSelectionRange || target.targetRange || target.range;
+      if (uri && range && uri.startsWith('file:')) {
+        const fp = clangdPath(uri);
+        await openFile(fp);
+        const targetEditor = state.files.get(fp)?.editor;
+        if (targetEditor) {
+          targetEditor.gotoLine(range.start.line + 1);
+          const offset = offsetAtPosition(targetEditor.text, range.start);
+          targetEditor.setCursor(offset);
+        }
+        return;
+      }
+    }
+  }
   // search in open files and project tree
   const search = async () => {
     for (const [fp, f] of state.files) {
@@ -2165,7 +2747,7 @@ function gotoDefinition() {
       }
     }
   };
-  search();
+  search().catch((e) => logOut('Definition search failed: ' + e.message, 'err-text'));
 }
 
 /* ---------------------------------------------------------------- dialogs */
@@ -2235,7 +2817,10 @@ function shortcutsDialog() {
         ['Ctrl+F / Ctrl+H', 'Find / Replace'], ['Ctrl+Shift+F', 'Find in files'],
         ['Ctrl+P', 'Go to file'], ['Ctrl+Alt+Shift+N', 'Go to symbol'], ['Ctrl+G', 'Go to line'],
         ['Double Shift', 'Search everywhere'], ['Ctrl+E', 'Recent files'],
-        ['Ctrl+Space', 'Code completion'], ['Alt+Insert', 'New file from template'],
+        ['Ctrl+Space', 'clangd completion / snippets'], ['F12 / F2', 'Go to definition / rename symbol'],
+        ['Ctrl+.', 'Quick fix / refactor'], ['Ctrl+Alt+L', 'Format document'],
+        ['Ctrl+Alt+I', 'C++ hover information'], ['Ctrl+Shift+Space', 'C++ signature help'],
+        ['Alt+Insert', 'New file from template'],
         ['Ctrl+/', 'Toggle comment'], ['Ctrl+D', 'Duplicate line'],
         ['Ctrl+F12', 'File structure'], ['Alt+1..9', 'Tool windows'],
         ['Alt+F12', 'Terminal'], ['Ctrl+Shift+F12', 'Hide tool windows'],
@@ -2281,9 +2866,14 @@ function bindActions() {
   action('recent', 'Recent Files', 'Ctrl+E', () => showGotoPopup('file'));
   action('lastedit', 'Last Edit Location', 'Ctrl+Shift+Backspace', () => {});
 
-  action('complete', 'Basic Completion', 'Ctrl+Space', () => showAutocomplete(true));
+  action('complete', 'C++ IntelliSense Completion', 'Ctrl+Space', () => showAutocomplete(true));
+  action('definition', 'Go to Definition', 'F12', gotoDefinition);
+  action('rename-symbol', 'Rename Symbol', 'F2', renameSymbol);
+  action('quick-fix', 'Quick Fix', 'Ctrl+.', codeActions);
+  action('format-document', 'Format Document', 'Ctrl+Alt+L', formatDocument);
+  action('show-hover', 'Show C++ Information', 'Ctrl+Alt+I', showHover);
+  action('signature-help', 'Signature Help', 'Ctrl+Shift+Space', showSignatureHelp);
   action('newfile', 'New File from Template...', 'Alt+Insert', () => newFileTemplate(state.root || ''));
-  action('reformat', 'Reformat Code', 'Ctrl+Alt+L', () => {});
 
   action('build', 'Build Project', 'Ctrl+F9', () => buildProject());
   action('rebuild', 'Rebuild Project', null, () => buildProject(true));
@@ -2363,6 +2953,11 @@ function bindActions() {
   $('st-errors').addEventListener('click', () => showSidebarView('problems'));
   $('st-warnings').addEventListener('click', () => showSidebarView('problems'));
   $('st-branch').addEventListener('click', () => showSidebarView('git'));
+  $('st-clangd').addEventListener('click', () => {
+    const editor = activeEditor();
+    if (editor && clangdLanguageId(editor.path)) ensureClangd();
+    else logOut('Open a C or C++ source/header file to start clangd.', 'warn-text');
+  });
 }
 
 /* ---------------------------------------------------------------- set root */
@@ -2370,6 +2965,7 @@ function bindActions() {
 async function setRoot(p) {
   if (!p) return;
   const restartTerminal = !!state.term.id || !!state.term.starting;
+  await stopClangd();
   state.root = path.resolve(p);
   $('menu-folder-name').textContent = state.root;
   $('project-title').textContent = path.basename(state.root);
@@ -2410,12 +3006,14 @@ async function init() {
   await api('GET', '/api/env').then((env) => {
     state.tools = env.tools;
   }).catch(() => {});
+  state.clangd.status = state.tools.clangd ? 'stopped' : 'missing';
+  updateClangdStatus();
   renderProblems();
   renderBreakpointsList();
   showBottom('build');
   showSidebarView('project');
   logOut('FullIDE ready. Open a folder or create a new project to begin.', 'ok-text');
-  logOut('Toolchain: g++ ' + (state.tools.gxx ? '✓' : '✗') + ' · cmake ' + (state.tools.cmake ? '✓' : '✗') + ' · ninja ' + (state.tools.ninja ? '✓' : '✗') + ' · gdb ' + (state.tools.gdb ? '✓' : '✗') + ' · raylib ' + (state.tools.raylib ? '✓' : '✗'));
+  logOut('Toolchain: g++ ' + (state.tools.gxx ? '✓' : '✗') + ' · cmake ' + (state.tools.cmake ? '✓' : '✗') + ' · ninja ' + (state.tools.ninja ? '✓' : '✗') + ' · gdb ' + (state.tools.gdb ? '✓' : '✗') + ' · clangd ' + (state.tools.clangd ? '✓' : '✗') + ' · raylib ' + (state.tools.raylib ? '✓' : '✗'));
 
   // auto-open workspace root
   const env = await api('GET', '/api/env').catch(() => null);

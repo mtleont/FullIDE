@@ -450,6 +450,9 @@ body {
 #st-branch:hover { color: var(--accent); }
 .st-problems { cursor: pointer; }
 #st-errors { color: var(--err); } #st-warnings { color: var(--warn); }
+#st-clangd { cursor: pointer; }
+#st-clangd.ready { color: var(--ok); }
+#st-clangd.missing, #st-clangd.failed { color: var(--warn); }
 #st-build { color: var(--fg-dim); }
 
 /* ============ MODAL ============ */

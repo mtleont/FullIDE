@@ -93,6 +93,7 @@ function detectTools() {
   };
   const info = {
     gxx: find('g++.exe'), gcc: find('gcc.exe'), clang: find('clang++.exe'),
+    clangd: process.env.FULLIDE_CLANGD || find('clangd.exe'),
     cmake: find('cmake.exe'), ninja: find('ninja.exe'), gdb: find('gdb.exe'),
     git: find('git.exe'), make: find('make.exe'),
     raylib: false, raylibLib: null, toolPaths: [],
@@ -244,6 +245,273 @@ function startTerm(cwd) {
   return { id, shell: shellName, cwd: resolvedCwd };
 }
 
+/* --------------------------------------------------------------- clangd LSP */
+
+const clangdSessions = new Map();
+const clangdRoots = new Map();
+
+function clangdSend(session, message) {
+  if (session.proc.exitCode !== null || session.proc.stdin.destroyed) {
+    throw new Error('clangd is not running');
+  }
+  const body = Buffer.from(JSON.stringify(message), 'utf8');
+  session.proc.stdin.write(Buffer.concat([
+    Buffer.from('Content-Length: ' + body.length + '\r\n\r\n', 'ascii'),
+    body,
+  ]));
+}
+
+function clangdRequest(session, method, params, timeoutMs) {
+  const id = ++session.nextRequestId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      session.pending.delete(id);
+      reject(new Error('clangd request timed out: ' + method));
+    }, timeoutMs || 15000);
+    session.pending.set(id, { resolve, reject, timer, method });
+    try {
+      clangdSend(session, { jsonrpc: '2.0', id, method, params: params || {} });
+    } catch (e) {
+      clearTimeout(timer);
+      session.pending.delete(id);
+      reject(e);
+    }
+  });
+}
+
+function clangdNotify(session, method, params) {
+  if (session.status !== 'ready') throw new Error('clangd is not ready');
+  clangdSend(session, { jsonrpc: '2.0', method, params: params || {} });
+}
+
+function handleClangdMessage(session, message) {
+  if (message.method && message.id !== undefined) {
+    let result = null;
+    if (message.method === 'workspace/configuration') {
+      result = (message.params && message.params.items || []).map(() => ({}));
+    } else if (message.method === 'workspace/workspaceFolders') {
+      result = [{ uri: require('url').pathToFileURL(session.root + path.sep).href, name: path.basename(session.root) }];
+    } else if (message.method === 'workspace/applyEdit') {
+      result = { applied: false, failureReason: 'FullIDE applies edits from its editor actions.' };
+    } else if (!['client/registerCapability', 'window/workDoneProgress/create'].includes(message.method)) {
+      clangdSend(session, {
+        jsonrpc: '2.0', id: message.id,
+        error: { code: -32601, message: 'Unsupported clangd client request: ' + message.method },
+      });
+      return;
+    }
+    clangdSend(session, { jsonrpc: '2.0', id: message.id, result });
+    return;
+  }
+  if (message.id !== undefined && (message.result !== undefined || message.error)) {
+    const pending = session.pending.get(message.id);
+    if (pending) {
+      session.pending.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(message.error.message || 'clangd request failed'));
+      else pending.resolve(message.result);
+    }
+    return;
+  }
+  if (message.method === 'textDocument/publishDiagnostics') {
+    session.diagnostics.set(message.params.uri, message.params);
+    session.broadcast({ type: 'diagnostics', params: message.params });
+  } else if (message.method === 'window/logMessage' || message.method === 'window/showMessage') {
+    const params = message.params || {};
+    session.broadcast({ type: 'log', message: params.message || '', severity: params.type || 3 });
+  }
+}
+
+function readClangdMessages(session, chunk) {
+  session.buffer = Buffer.concat([session.buffer, chunk]);
+  while (true) {
+    const boundary = session.buffer.indexOf('\r\n\r\n');
+    if (boundary < 0) return;
+    const header = session.buffer.subarray(0, boundary).toString('ascii');
+    const lengthMatch = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(header);
+    if (!lengthMatch) throw new Error('clangd sent an invalid LSP message header');
+    const length = Number(lengthMatch[1]);
+    const bodyStart = boundary + 4;
+    if (!Number.isSafeInteger(length) || length < 0 || length > 16 * 1024 * 1024) {
+      throw new Error('clangd sent an invalid LSP message size');
+    }
+    if (session.buffer.length < bodyStart + length) return;
+    const body = session.buffer.subarray(bodyStart, bodyStart + length).toString('utf8');
+    session.buffer = session.buffer.subarray(bodyStart + length);
+    let message;
+    try { message = JSON.parse(body); }
+    catch (e) { throw new Error('clangd sent invalid JSON: ' + e.message); }
+    handleClangdMessage(session, message);
+  }
+}
+
+function startClangd(root) {
+  if (!TOOLS.clangd) return { error: 'clangd was not found. Install clangd or set it on PATH, then restart FullIDE.' };
+  const resolvedRoot = path.resolve(root || WORKSPACE);
+  let stat;
+  try { stat = fs.statSync(resolvedRoot); }
+  catch (e) { return { error: 'Cannot start clangd: ' + e.message }; }
+  if (!stat.isDirectory()) return { error: 'clangd project root is not a directory' };
+  const rootKey = process.platform === 'win32' ? resolvedRoot.toLowerCase() : resolvedRoot;
+  const existingId = clangdRoots.get(rootKey);
+  const existing = existingId && clangdSessions.get(existingId);
+  if (existing && existing.status !== 'stopped' && existing.status !== 'failed') {
+    return { id: existing.id, root: resolvedRoot, status: existing.status };
+  }
+
+  const id = 'c' + Math.random().toString(36).slice(2, 10);
+  let proc;
+  try {
+    const databaseDir = path.join(resolvedRoot, 'build');
+    const args = ['--background-index'];
+    const drivers = [TOOLS.gxx, TOOLS.gcc, TOOLS.clang].filter(Boolean);
+    if (drivers.length) args.push('--query-driver=' + drivers.join(','));
+    if (fs.existsSync(path.join(databaseDir, 'compile_commands.json'))) {
+      args.push('--compile-commands-dir=' + databaseDir);
+    } else if (fs.existsSync(path.join(resolvedRoot, 'compile_commands.json'))) {
+      args.push('--compile-commands-dir=' + resolvedRoot);
+    }
+    proc = cp.spawn(TOOLS.clangd, args, {
+      cwd: resolvedRoot,
+      env: childEnv([]),
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    return { error: 'Failed to start clangd: ' + e.message };
+  }
+
+  const session = {
+    id, proc, root: resolvedRoot, rootKey, status: 'starting', buffer: Buffer.alloc(0),
+    nextRequestId: 0, pending: new Map(), listeners: new Set(), events: [],
+    diagnostics: new Map(), documents: new Map(), exitMessage: null,
+    broadcast(event) {
+      if (event.type === 'diagnostics') {
+        this.diagnostics.set(event.params.uri, event.params);
+      } else {
+        this.events.push(event);
+        if (this.events.length > 100) this.events.shift();
+      }
+      for (const listener of this.listeners) listener(event);
+    },
+  };
+  session.ready = new Promise((resolve, reject) => {
+    session.resolveReady = resolve;
+    session.rejectReady = reject;
+  });
+  session.ready.catch(() => {});
+  clangdSessions.set(id, session);
+  clangdRoots.set(rootKey, id);
+
+  proc.stdout.on('data', (chunk) => {
+    try { readClangdMessages(session, chunk); }
+    catch (e) {
+      session.status = 'failed';
+      session.broadcast({ type: 'error', message: e.message });
+      proc.kill();
+    }
+  });
+  proc.stderr.on('data', (chunk) => {
+    const message = chunk.toString('utf8').trim();
+    if (message) session.broadcast({ type: 'log', message, severity: 2 });
+  });
+  proc.on('error', (e) => {
+    session.status = 'failed';
+    session.exitMessage = { type: 'status', status: 'failed', message: e.message };
+    session.rejectReady(e);
+    session.broadcast(session.exitMessage);
+    for (const pending of session.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(e);
+    }
+    session.pending.clear();
+  });
+  proc.on('close', (code, signal) => {
+    const message = session.status === 'failed' ? 'clangd exited after an error' : 'clangd stopped';
+    if (session.status !== 'failed') session.status = 'stopped';
+    session.exitMessage = { type: 'status', status: session.status, code, signal, message };
+    session.rejectReady(new Error(message));
+    session.broadcast(session.exitMessage);
+    for (const pending of session.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    session.pending.clear();
+    if (clangdRoots.get(rootKey) === id) clangdRoots.delete(rootKey);
+    setTimeout(() => clangdSessions.delete(id), 60000).unref();
+  });
+
+  (async () => {
+    try {
+      const rootUri = require('url').pathToFileURL(resolvedRoot + path.sep).href;
+      const initialized = await clangdRequest(session, 'initialize', {
+        processId: process.pid,
+        clientInfo: { name: 'FullIDE', version: '1.0.0' },
+        rootUri,
+        workspaceFolders: [{ uri: rootUri, name: path.basename(resolvedRoot) }],
+        capabilities: {
+          general: { positionEncodings: ['utf-16'] },
+          textDocument: {
+            synchronization: { dynamicRegistration: false, didSave: true },
+            completion: {
+              completionItem: {
+                snippetSupport: true, commitCharactersSupport: true,
+                documentationFormat: ['markdown', 'plaintext'], deprecatedSupport: true,
+                preselectSupport: true, insertReplaceSupport: true,
+                resolveSupport: { properties: ['documentation', 'detail', 'additionalTextEdits'] },
+              },
+            },
+            publishDiagnostics: { versionSupport: true, relatedInformation: true },
+            definition: { linkSupport: true },
+            hover: { contentFormat: ['markdown', 'plaintext'] },
+            signatureHelp: { signatureInformation: { documentationFormat: ['markdown', 'plaintext'] } },
+            documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+            formatting: { dynamicRegistration: false },
+            rename: { prepareSupport: true },
+            codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ['quickfix', 'refactor', 'source'] } } },
+          },
+          workspace: { applyEdit: false, workspaceFolders: true, configuration: true },
+        },
+        initializationOptions: { clangdFileStatus: true },
+      });
+      if (session.status !== 'starting') return;
+      session.capabilities = initialized && initialized.capabilities || {};
+      clangdSend(session, { jsonrpc: '2.0', method: 'initialized', params: {} });
+      session.status = 'ready';
+      session.resolveReady(session);
+      session.broadcast({ type: 'status', status: 'ready', message: 'clangd ready' });
+    } catch (e) {
+      if (session.status !== 'failed' && session.status !== 'stopped') {
+        session.status = 'failed';
+        session.exitMessage = { type: 'status', status: 'failed', message: e.message };
+        session.rejectReady(e);
+        session.broadcast(session.exitMessage);
+        proc.kill();
+      }
+    }
+  })();
+  return { id, root: resolvedRoot, status: session.status };
+}
+
+function stopClangd(session) {
+  if (session.status === 'stopped' || session.status === 'failed' || session.status === 'stopping') return;
+  const wasReady = session.status === 'ready';
+  session.status = 'stopping';
+  if (clangdRoots.get(session.rootKey) === session.id) clangdRoots.delete(session.rootKey);
+  if (!wasReady) {
+    setTimeout(() => { if (session.proc.exitCode === null) session.proc.kill(); }, 100).unref();
+    return;
+  }
+  clangdRequest(session, 'shutdown', {}, 1000)
+    .catch((e) => session.broadcast({ type: 'log', message: 'clangd shutdown request failed: ' + e.message, severity: 2 }))
+    .finally(() => {
+      try {
+        if (session.proc.exitCode === null) clangdSend(session, { jsonrpc: '2.0', method: 'exit', params: null });
+      } catch (e) {}
+      setTimeout(() => { if (session.proc.exitCode === null) session.proc.kill(); }, 500).unref();
+    });
+}
+
 /* ----------------------------------------------------------- debug sessions */
 
 const debugSessions = new Map();
@@ -318,6 +586,7 @@ function buildFallback(root) {
 
   const std = isCpp ? 'c++23' : 'c17';
   const args = ['-std=' + std, '-g', '-O2', '-Wall', '-Wextra', '-I' + path.join(root, 'include'), '-I' + path.join(root, 'src')];
+  const compileArgs = args.slice();
   if (usesRaylib && TOOLS.raylib) {
     args.push('-L' + TOOLS.raylibLib, '-lraylib', '-lopengl32', '-lgdi32', '-lwinmm', '-luser32', '-static-libgcc');
   }
@@ -325,7 +594,19 @@ function buildFallback(root) {
 
   const t0 = Date.now();
   const r = cp.spawnSync(compiler, args, { cwd: root, env: childEnv([]), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 300000 });
-  const output = (r.stdout || '') + (r.stderr || '');
+  let output = (r.stdout || '') + (r.stderr || '');
+  try {
+    const databaseDir = path.join(root, 'build');
+    fs.mkdirSync(databaseDir, { recursive: true });
+    const database = sources.map((file) => ({
+      directory: root,
+      file,
+      arguments: [compiler, ...compileArgs, '-c', file],
+    }));
+    fs.writeFileSync(path.join(databaseDir, 'compile_commands.json'), JSON.stringify(database, null, 2));
+  } catch (e) {
+    output += '\nWarning: could not write clangd compilation database: ' + e.message + '\n';
+  }
   return {
     ok: r.status === 0,
     output,
@@ -347,7 +628,7 @@ function buildCMake(root) {
     output += (r.stdout || '') + (r.stderr || '');
     return r.status === 0;
   };
-  const ok = runStep(TOOLS.cmake, ['-S', '.', '-B', 'build', '-G', 'Ninja'], 'Configure')
+  const ok = runStep(TOOLS.cmake, ['-S', '.', '-B', 'build', '-G', 'Ninja', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'], 'Configure')
     && runStep(TOOLS.cmake, ['--build', 'build', '--parallel', '4'], 'Build');
 
   // find newest exe under build/
@@ -383,7 +664,7 @@ function buildProject(root) {
       output += (r.stdout || '') + (r.stderr || '');
       return r.status === 0;
     };
-    const ok = runStep(['-S', '.', '-B', 'build'], 'Configure') && runStep(['--build', 'build'], 'Build');
+    const ok = runStep(['-S', '.', '-B', 'build', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'], 'Configure') && runStep(['--build', 'build'], 'Build');
     let exePath = null, newest = 0;
     const scan = (dir, depth) => {
       if (depth > 6) return;
@@ -490,7 +771,10 @@ const server = http.createServer(async (req, res) => {
   const u = url.parse(req.url, true);
   const pathname = u.pathname;
 
-  if (req.method === 'GET' && pathname === '/api/env') return sendJSON(res, 200, { tools: TOOLS, workspace: WORKSPACE });
+  if (req.method === 'GET' && pathname === '/api/env') return sendJSON(res, 200, {
+    tools: TOOLS, workspace: WORKSPACE,
+    clangd: { available: !!TOOLS.clangd, path: TOOLS.clangd },
+  });
 
   if (req.method === 'GET' && pathname === '/api/settings') {
     try { return sendJSON(res, 200, JSON.parse(fs.readFileSync(path.join(SETTINGS_DIR, 'settings.json'), 'utf8'))); }
@@ -634,6 +918,69 @@ const server = http.createServer(async (req, res) => {
     const s = runSessions.get(id);
     if (s) s.stop();
     return sendJSON(res, 200, { ok: true });
+  }
+
+  if (req.method === 'POST' && pathname === '/api/clangd/start') {
+    const body = JSON.parse(await readBody(req));
+    const result = startClangd(body.root);
+    return sendJSON(res, result.error ? 503 : 200, result);
+  }
+  if (pathname.startsWith('/api/clangd/')) {
+    const parts = pathname.split('/');
+    const session = clangdSessions.get(parts[3]);
+    if (!session) return sendJSON(res, 404, { error: 'no clangd session' });
+    if (req.method === 'GET' && parts[4] === 'stream') {
+      const send = sse(res);
+      session.listeners.add(send);
+      res.on('close', () => session.listeners.delete(send));
+      for (const event of session.events) send(event);
+      for (const params of session.diagnostics.values()) send({ type: 'diagnostics', params });
+      if (session.exitMessage) send(session.exitMessage);
+      return;
+    }
+    if (req.method === 'POST' && parts[4] === 'request') {
+      const { method, params } = JSON.parse(await readBody(req));
+      const allowed = new Set([
+        'textDocument/completion', 'textDocument/definition', 'textDocument/hover',
+        'textDocument/formatting', 'textDocument/rename', 'textDocument/codeAction',
+        'textDocument/signatureHelp', 'textDocument/documentSymbol',
+      ]);
+      if (!allowed.has(method)) return sendJSON(res, 400, { error: 'unsupported clangd request' });
+      if (!params || typeof params !== 'object' || Array.isArray(params)) {
+        return sendJSON(res, 400, { error: 'clangd request params must be an object' });
+      }
+      await session.ready;
+      return sendJSON(res, 200, { result: await clangdRequest(session, method, params) });
+    }
+    if (req.method === 'POST' && parts[4] === 'notify') {
+      const { method, params } = JSON.parse(await readBody(req));
+      const allowed = new Set([
+        'textDocument/didOpen', 'textDocument/didChange',
+        'textDocument/didSave', 'textDocument/didClose',
+      ]);
+      if (!allowed.has(method)) return sendJSON(res, 400, { error: 'unsupported clangd notification' });
+      if (!params || typeof params !== 'object' || Array.isArray(params)) {
+        return sendJSON(res, 400, { error: 'clangd notification params must be an object' });
+      }
+      if (!params.textDocument || typeof params.textDocument.uri !== 'string') {
+        return sendJSON(res, 400, { error: 'clangd notification requires a document URI' });
+      }
+      await session.ready;
+      if (method === 'textDocument/didOpen') {
+        session.documents.set(params.textDocument.uri, params.textDocument.version);
+      } else if (method === 'textDocument/didClose') {
+        session.documents.delete(params.textDocument.uri);
+        session.diagnostics.delete(params.textDocument.uri);
+      } else if (method === 'textDocument/didChange') {
+        session.documents.set(params.textDocument.uri, params.textDocument.version);
+      }
+      clangdNotify(session, method, params);
+      return sendJSON(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && parts[4] === 'stop') {
+      stopClangd(session);
+      return sendJSON(res, 200, { ok: true });
+    }
   }
 
   if (req.method === 'POST' && pathname === '/api/term') {

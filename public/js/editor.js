@@ -280,6 +280,7 @@
     }
 
     setValue(text, path) {
+      text = String(text).replace(/\r\n?/g, '\n');
       this.text = text;
       this.path = path || this.path;
       this.ta.value = text;

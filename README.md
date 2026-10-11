@@ -22,7 +22,9 @@ Or double-click **start.bat**.
 - Find in Files with match highlighting (Ctrl+Shift+F)
 - Minimap with viewport indicator and click-to-jump
 - File Structure view (Ctrl+F12) — functions, classes, macros, namespaces
-- Code completion (Ctrl+Space) — keywords, STL, raylib API, snippets, file symbols
+- clangd C/C++ IntelliSense — compiler-aware completions, live diagnostics, go to definition,
+  hover/signature help, symbol rename, quick fixes, and document formatting
+- Code completion (Ctrl+Space) — clangd suggestions plus keywords, snippets, and local symbols
 - Live templates / snippets (type `gameloop` + Tab, `entity`, `rayloop`, `aabb`, ...)
 - Go to File (Ctrl+P), Go to Symbol (Ctrl+Alt+Shift+N), Go to Line (Ctrl+G)
 - Search Everywhere (double Shift), Go to Definition (F12), Recent Files (Ctrl+E)
@@ -38,6 +40,8 @@ Or double-click **start.bat**.
 - Compiler diagnostics parsed into a **Problems** panel (Ctrl+Shift+M) with
   click-to-jump, error/warning markers in the gutter and on editor lines,
   counts in the status bar
+- CMake builds export `compile_commands.json` for clangd; direct builds generate a
+  matching database with their compiler and include flags
 
 ### Debugging (real GDB engine)
 - **F5** to debug, **F8** step over, **F7** step into, **F9** resume
@@ -86,12 +90,18 @@ FullIDE/
         ├── syntax.js       C/C++ tokenizer
         ├── editor.js       editor widget (highlight overlay, gutter, minimap, find)
         ├── snippets.js     live templates
-        └── app.js          application logic (project tree, build/run/debug, search, completion)
+        └── app.js          application logic (project tree, build/run/debug, clangd, search)
 ```
 
 The backend exposes a small REST + SSE API (`/api/build`, `/api/run`, `/api/debug/...`,
+`/api/clangd/...`,
 `/api/term/...`, `/api/git/...`, `/api/file`, `/api/tree`, `/api/search`, ...) that the
 browser frontend consumes. No npm dependencies — Node's built-in `http`/`child_process` only.
+
+Install `clangd` and ensure `clangd.exe` is on `PATH` before starting FullIDE, or set
+`FULLIDE_CLANGD` to its executable path. The status bar shows whether the language
+server is available; without it, the existing keyword/snippet completion remains
+available.
 
 ## Keyboard shortcuts
 
@@ -102,7 +112,10 @@ browser frontend consumes. No npm dependencies — Node's built-in `http`/`child
 | Ctrl+F, Ctrl+H, Ctrl+Shift+F | Find, Replace, Find in files |
 | Ctrl+P, Ctrl+G, Ctrl+F12 | Go to file / line / structure |
 | Double Shift | Search everywhere |
-| Ctrl+Space | Completion |
+| Ctrl+Space | clangd completion / snippets |
+| F12 / F2 | Go to definition / rename symbol |
+| Ctrl+. / Ctrl+Alt+L | Quick fix / format document |
+| Ctrl+Alt+I / Ctrl+Shift+Space | C++ hover / signature help |
 | Alt+Insert | New file from template |
 | Ctrl+F8 / Ctrl+Shift+F8 | Toggle breakpoint / breakpoint list |
 | F8 / F7 / F9 | Step over / into / resume |

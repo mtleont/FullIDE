@@ -1,7 +1,7 @@
 {
   "name": "fullide",
   "version": "1.0.0",
-  "description": "FullIDE — a CLion-style C/C++ IDE for game development (web UI, real GCC/CMake/GDB/raylib toolchain)",
+  "description": "FullIDE — a custom C/C++ IDE with clangd IntelliSense and a native GCC/CMake/GDB toolchain",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
