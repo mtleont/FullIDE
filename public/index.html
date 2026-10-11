@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FullIDE — C/C++ Game Development IDE</title>
+<link rel="stylesheet" href="css/theme.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%232b6cb0'/><path d='M4 11V5l4 3 4-3v6' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ MENU BAR ============ -->
+  <div id="menubar">
+    <div class="menu-item" data-menu="file">File</div>
+    <div class="menu-item" data-menu="edit">Edit</div>
+    <div class="menu-item" data-menu="view">View</div>
+    <div class="menu-item" data-menu="navigate">Navigate</div>
+    <div class="menu-item" data-menu="code">Code</div>
+    <div class="menu-item" data-menu="build">Build</div>
+    <div class="menu-item" data-menu="run">Run</div>
+    <div class="menu-item" data-menu="tools">Tools</div>
+    <div class="menu-item" data-menu="window">Window</div>
+    <div class="menu-item" data-menu="help">Help</div>
+    <div id="menu-folder-name" title="Workspace"></div>
+  </div>
+
+  <!-- ============ TOOLBAR ============ -->
+  <div id="toolbar">
+    <button class="tb-btn" id="tb-open" title="Open Folder (Ctrl+K Ctrl+O)">
+      <svg viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7h-13z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-newproject" title="New Project (Ctrl+Alt+Shift+N)">
+      <svg viewBox="0 0 16 16"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.4"/></svg>
+    </button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" id="tb-save" title="Save (Ctrl+S)">
+      <svg viewBox="0 0 16 16"><path d="M3 2h8l2 2v10H3z M5 2v4h6V2 M5 14V9h6v5" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-saveall" title="Save All (Ctrl+Alt+S)">
+      <svg viewBox="0 0 16 16"><path d="M2 6h6l2 2h4v6H2z M4 6V2h4v4 M4 14V10h4v4" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+    </button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" id="tb-build" title="Build Project (Ctrl+F9)">
+      <svg viewBox="0 0 16 16"><path d="M3 2l10 6-10 6z" fill="currentColor"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-rebuild" title="Rebuild Project">
+      <svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 1-5.2 3M2.5 2v4h4" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-clean" title="Clean">
+      <svg viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.3"/></svg>
+    </button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn accent" id="tb-run" title="Run (Shift+F10)">
+      <svg viewBox="0 0 16 16"><path d="M4 2l9 6-9 6z" fill="currentColor"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-debug" title="Debug (F5)">
+      <svg viewBox="0 0 16 16"><path d="M4 2l9 6-9 6z" fill="currentColor"/><circle cx="3.4" cy="3.4" r="1.4" fill="currentColor"/><circle cx="3.4" cy="8" r="1.4" fill="currentColor"/><circle cx="3.4" cy="12.6" r="1.4" fill="currentColor"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-stop" title="Stop (Ctrl+F2)">
+      <svg viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" fill="currentColor"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-runargs" title="Edit Run Configuration">
+      <svg viewBox="0 0 16 16"><path d="M2 12l4-8 2 3 3-4 3 9z" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+    </button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" id="tb-search" title="Search Everywhere (Double Shift)">
+      <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3"/></svg>
+    </button>
+    <div class="tb-flex"></div>
+    <button class="tb-btn" id="tb-terminal" title="Terminal (Alt+F12)">
+      <svg viewBox="0 0 16 16"><path d="M2 3h12v10H2z M4 6l3 2-3 2M9 10h3" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-settings" title="Settings (Ctrl+Alt+S)">
+      <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" stroke="currentColor" stroke-width="1.1"/></svg>
+    </button>
+  </div>
+
+  <!-- ============ MAIN ============ -->
+  <div id="main">
+
+    <!-- Sidebar -->
+    <div id="sidebar">
+      <div id="sidebar-tabs">
+        <button class="stab active" data-view="project" title="Project (Alt+1)">
+          <svg viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7h-13z" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+        </button>
+        <button class="stab" data-view="search" title="Find in Files (Ctrl+Shift+F)">
+          <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.1"/></svg>
+        </button>
+        <button class="stab" data-view="problems" title="Problems (Ctrl+Shift+M)">
+          <svg viewBox="0 0 16 16"><path d="M8 1.5L15 14H1z" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M8 6v3.5M8 11.5v.5" stroke="currentColor" stroke-width="1.2"/></svg>
+        </button>
+        <button class="stab" data-view="structure" title="File Structure (Ctrl+F12)">
+          <svg viewBox="0 0 16 16"><path d="M3 2v12M3 4h8M3 8h6M3 12h9" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>
+        </button>
+        <button class="stab" data-view="git" title="Version Control (Alt+9)">
+          <svg viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.1"/><circle cx="4.5" cy="12.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.1"/><circle cx="11.5" cy="6" r="1.8" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M4.5 5.3v5.4M11.5 7.8c0 2.5-3 2.2-4.5 3.2" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+        </button>
+      </div>
+      <div id="sidebar-views">
+        <div class="sview active" id="view-project">
+          <div id="project-header">
+            <span id="project-title">No project open</span>
+            <button class="icon-btn" id="btn-refresh-tree" title="Refresh">⟳</button>
+          </div>
+          <div id="tree"></div>
+        </div>
+        <div class="sview" id="view-search">
+          <div id="search-panel">
+            <div class="search-row"><input id="search-input" placeholder="Search"><button id="search-go" class="mini-btn">Find</button></div>
+            <div class="search-row"><input id="search-replace" placeholder="Replace (optional)"><button id="search-replace-go" class="mini-btn">Replace</button></div>
+            <div class="search-row options">
+              <label><input type="checkbox" id="search-case"> Match case</label>
+              <label><input type="checkbox" id="search-word"> Words</label>
+              <label><input type="checkbox" id="search-regex"> Regex</label>
+            </div>
+          </div>
+          <div id="search-results"></div>
+        </div>
+        <div class="sview" id="view-problems"><div id="problems-list"></div></div>
+        <div class="sview" id="view-structure"><div id="structure-list"></div></div>
+        <div class="sview" id="view-git">
+          <div id="git-commit-box">
+            <textarea id="git-commit-msg" placeholder="Commit message..." rows="3"></textarea>
+            <div class="git-actions">
+              <button class="mini-btn" id="git-commit-btn">Commit</button>
+              <button class="mini-btn" id="git-init-btn">Init Repo</button>
+              <button class="mini-btn" id="git-refresh-btn">Refresh</button>
+            </div>
+          </div>
+          <div id="git-status-list"></div>
+          <div id="git-log-list"></div>
+        </div>
+      </div>
+      <div id="sidebar-resizer"></div>
+    </div>
+
+    <!-- Center: tabs + editor + bottom panel -->
+    <div id="center">
+      <div id="editor-tabs"></div>
+      <div id="editor-area">
+        <div id="editor-host"></div>
+        <div id="welcome-screen">
+          <div class="welcome-logo">FullIDE</div>
+          <div class="welcome-sub">C/C++ IDE for game development</div>
+          <div class="welcome-actions">
+            <button class="welcome-btn" id="welcome-open">Open Folder</button>
+            <button class="welcome-btn" id="welcome-new">New Project</button>
+            <button class="welcome-btn" id="welcome-recent">Open Workspace</button>
+          </div>
+          <div class="welcome-tips">
+            <div class="tip"><b>Ctrl+F9</b> Build project (CMake/Ninja or direct g++)</div>
+            <div class="tip"><b>Shift+F10</b> Run &nbsp;·&nbsp; <b>F5</b> Debug with GDB (breakpoints in gutter)</div>
+            <div class="tip"><b>Alt+Insert</b> New file / class &nbsp;·&nbsp; <b>Ctrl+Space</b> Code completion</div>
+            <div class="tip"><b>Ctrl+Shift+F</b> Find in files &nbsp;·&nbsp; <b>Double Shift</b> Search everywhere</div>
+            <div class="tip"><b>Alt+Insert → Raylib</b> Game project templates: Pong, Snake, SDL2, SFML, OpenGL</div>
+          </div>
+        </div>
+        <div id="findbar" class="hidden">
+          <input id="find-input" placeholder="Find">
+          <input id="replace-input" placeholder="Replace">
+          <button class="mini-btn" id="find-prev" title="Previous (Shift+Enter)">▲</button>
+          <button class="mini-btn" id="find-next" title="Next (Enter)">▼</button>
+          <button class="mini-btn" id="find-replace-one" title="Replace">⇄</button>
+          <button class="mini-btn" id="find-replace-all" title="Replace All">⇄*</button>
+          <label class="find-opt"><input type="checkbox" id="find-case"> Aa</label>
+          <label class="find-opt"><input type="checkbox" id="find-regex"> .*</label>
+          <button class="mini-btn" id="find-close" title="Close (Esc)">✕</button>
+        </div>
+        <div id="autocomplete" class="hidden"></div>
+      </div>
+
+      <!-- Bottom tool window -->
+      <div id="bottom-panel">
+        <div id="bottom-tabs">
+          <button class="btab active" data-bottom="build">Build</button>
+          <button class="btab" data-bottom="run">Run</button>
+          <button class="btab" data-bottom="debug">Debug</button>
+          <button class="btab" data-bottom="terminal">Terminal</button>
+          <button class="btab" data-bottom="output">Output</button>
+        </div>
+        <div id="bottom-content">
+          <div class="bpane active" id="pane-build"><div id="build-output" class="output"></div></div>
+          <div class="bpane" id="pane-run"><div id="run-output" class="output"></div></div>
+          <div class="bpane" id="pane-debug">
+            <div id="debug-toolbar">
+              <button class="mini-btn" id="dbg-step-over" title="Step Over (F8)">⤵ Step Over</button>
+              <button class="mini-btn" id="dbg-step-into" title="Step Into (F7)">⤵ Step Into</button>
+              <button class="mini-btn" id="dbg-resume" title="Resume (F9)">▶ Resume</button>
+              <button class="mini-btn" id="dbg-stop" title="Stop (Ctrl+F2)">■ Stop</button>
+              <span id="dbg-status">Not debugging</span>
+            </div>
+            <div id="debug-panes">
+              <div id="debug-variables"><div class="pane-title">Variables</div><div id="vars-list"></div></div>
+              <div id="debug-frames"><div class="pane-title">Call Stack</div><div id="frames-list"></div></div>
+              <div id="debug-bps"><div class="pane-title">Breakpoints</div><div id="bps-list"></div></div>
+            </div>
+          </div>
+          <div class="bpane" id="pane-terminal"><div id="terminal-output" class="output term"></div>
+            <div id="term-input-row"><span id="term-prompt">PS&gt;</span><input id="term-input" placeholder="Type a command and press Enter (cmd.exe)"></div>
+          </div>
+          <div class="bpane" id="pane-output"><div id="app-output" class="output"></div></div>
+        </div>
+        <div id="bottom-resizer"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ STATUS BAR ============ -->
+  <div id="statusbar">
+    <span id="st-branch" title="Git branch"></span>
+    <span class="st-flex"></span>
+    <span id="st-errors" class="st-problems"></span>
+    <span id="st-warnings" class="st-problems"></span>
+    <span id="st-pos">Ln 1, Col 1</span>
+    <span id="st-encoding">UTF-8</span>
+    <span id="st-lang"></span>
+    <span id="st-build" title="Build status"></span>
+  </div>
+</div>
+
+<!-- ============ DIALOGS ============ -->
+<div id="modal-backdrop" class="hidden">
+  <div id="modal">
+    <div id="modal-title"></div>
+    <div id="modal-body"></div>
+    <div id="modal-actions"></div>
+  </div>
+</div>
+
+<div id="menu-popup" class="hidden"></div>
+<div id="ctx-menu" class="hidden"></div>
+<div id="goto-popup" class="hidden"><input id="goto-input" placeholder=""><div id="goto-results"></div></div>
+
+<script src="js/templates-data.js"></script>
+<script src="js/syntax.js"></script>
+<script src="js/editor.js"></script>
+<script src="js/snippets.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
