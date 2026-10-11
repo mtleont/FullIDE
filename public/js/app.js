@@ -57,8 +57,8 @@ const state = {
   build: { exePath: null, running: false, diagnostics: [] },
   run: { session: null, es: null, running: false },
   debug: null,
-  term: { id: null, es: null },
-  settings: { fontSize: 13, tabSize: 4, minimap: true, autoBrackets: true, theme: 'darcula' },
+  term: { id: null, es: null, cwd: null, shell: null, starting: null, history: [], historyIndex: 0 },
+  settings: { fontSize: 13, tabSize: 4, minimap: true, autoBrackets: true, theme: 'fullide' },
   expanded: new Set(),
   runConfig: { exe: '', args: '', cwd: '' },
   findState: null,
@@ -102,6 +102,7 @@ async function loadSettings() {
     const s = await api('GET', '/api/settings');
     Object.assign(state.settings, s);
   } catch (e) {}
+  if (state.settings.theme === 'darcula') state.settings.theme = 'fullide';
   window.FullIDESettings = state.settings;
   applySettings();
 }
@@ -1305,23 +1306,55 @@ function stopDebug() {
 /* ---------------------------------------------------------------- terminal */
 
 async function ensureTerminal() {
-  if (state.term.id) return;
+  const cwd = state.root || null;
+  if (state.term.id && state.term.cwd === cwd) return;
+  if (state.term.starting) {
+    await state.term.starting;
+    if (state.term.id && state.term.cwd === cwd) return;
+  }
+  if (state.term.id) {
+    if (state.term.es) state.term.es.close();
+    api('POST', '/api/term/' + state.term.id + '/kill', {}).catch(() => {});
+    state.term.id = null;
+    state.term.es = null;
+    state.term.cwd = null;
+  }
+  state.term.starting = (async () => {
+    try {
+      const s = await api('POST', '/api/term', { cwd });
+      state.term.id = s.id;
+      state.term.cwd = cwd;
+      state.term.shell = s.shell;
+      $('term-input').placeholder = 'Send input to ' + s.shell;
+      $('term-input').title = 'Shell: ' + s.shell + '\nDirectory: ' + s.cwd;
+      const es = new EventSource('/api/term/' + s.id);
+      state.term.es = es;
+      es.addEventListener('message', (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); }
+        catch (err) {
+          appendTermOutput('\r\nInvalid terminal event: ' + err.message + '\r\n');
+          return;
+        }
+        if (msg.type === 'out' || msg.type === 'error') appendTermOutput(msg.text);
+        else if (msg.type === 'exit') {
+          es.close();
+          if (state.term.id === s.id) {
+            state.term.id = null;
+            state.term.es = null;
+            state.term.cwd = null;
+          }
+          appendTermOutput('\r\n[terminal process exited with code ' + msg.code + ']\r\n');
+        }
+      });
+    } catch (e) {
+      appendTermOutput('Terminal failed: ' + e.message + '\r\n');
+    }
+  })();
   try {
-    const s = await api('POST', '/api/term', { cwd: state.root || undefined });
-    state.term.id = s.id;
-    const es = new EventSource('/api/term/' + s.id);
-    state.term.es = es;
-    es.addEventListener('message', (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'out') appendTermOutput(msg.text);
-      else if (msg.type === 'exit') {
-        state.term.id = null;
-        state.term.es = null;
-        appendTermOutput('\r\n[process exited — press Enter to restart]\r\n');
-      }
-    });
-  } catch (e) {
-    appendTermOutput('Terminal failed: ' + e.message + '\r\n');
+    await state.term.starting;
+  } finally {
+    state.term.starting = null;
   }
 }
 
@@ -1335,10 +1368,21 @@ async function termSendLine() {
   const input = $('term-input');
   const line = input.value;
   input.value = '';
-  if (!line.trim()) { ensureTerminal(); return; }
   await ensureTerminal();
-  appendTermOutput('PS> ' + line + '\r\n');
-  api('POST', '/api/term/' + state.term.id + '/write', { data: line + '\r\n' }).catch(() => {});
+  if (!state.term.id) return;
+  if (line.trim()) {
+    state.term.history.push(line);
+    state.term.historyIndex = state.term.history.length;
+    appendTermOutput('› ' + line + '\r\n');
+  }
+  const newline = /^(cmd|cmd\.exe|powershell|powershell\.exe|pwsh|pwsh\.exe)$/i.test(state.term.shell) ? '\r\n' : '\n';
+  try {
+    await api('POST', '/api/term/' + state.term.id + '/write', { data: line + newline });
+  } catch (e) {
+    appendTermOutput('Terminal input failed: ' + e.message + '\r\n');
+    input.value = line;
+    input.focus();
+  }
 }
 
 /* ---------------------------------------------------------------- search in files */
@@ -1405,7 +1449,11 @@ async function replaceInFiles() {
     if (newContent !== data.content) {
       await api('POST', '/api/save', { path: fp, content: newContent });
       count++;
-      if (state.files.has(fp)) state.files.get(fp).editor.setValue(newContent, fp);
+      if (state.files.has(fp)) {
+        const editor = state.files.get(fp).editor;
+        editor._replaceRange(0, editor.text.length, newContent);
+        editor.markSaved();
+      }
     }
   }
   logOut('Replaced in ' + count + ' file(s)', 'ok-text');
@@ -1856,7 +1904,6 @@ function bindKeyboard() {
     if (ctrl && key === 'd') { e.preventDefault(); duplicateLine(); return; }
     if (ctrl && shift && key === 'y') { e.preventDefault(); deleteLine(); return; }
     if (ctrl && key === '/') { e.preventDefault(); toggleComment(); return; }
-    if (ctrl && key === 'y' && !shift) { /* native redo */ return; }
     if (ctrl && alt && key === 'l') { e.preventDefault(); logOut('Reformat: not implemented for C/C++ (use clang-format)'); return; }
     if (e.key === 'F5') { e.preventDefault(); debugProject(); return; }
     if (e.key === 'F7') { e.preventDefault(); debugStep('into'); return; }
@@ -1952,7 +1999,16 @@ function bindKeyboard() {
   // terminal input
   $('term-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); termSendLine(); }
-    if (e.key === 'ArrowUp') { /* history */ }
+    if (e.key === 'ArrowUp' && state.term.historyIndex > 0) {
+      e.preventDefault();
+      state.term.historyIndex--;
+      $('term-input').value = state.term.history[state.term.historyIndex];
+    }
+    if (e.key === 'ArrowDown' && state.term.historyIndex < state.term.history.length) {
+      e.preventDefault();
+      state.term.historyIndex++;
+      $('term-input').value = state.term.history[state.term.historyIndex] || '';
+    }
   });
   $('terminal-output').addEventListener('click', () => $('term-input').focus());
 
@@ -2125,7 +2181,7 @@ function settingsDialog() {
     </div>
     <div class="field"><label>Theme</label>
       <select id="st-theme">
-        <option value="darcula" ${s.theme === 'darcula' ? 'selected' : ''}>Darcula (dark)</option>
+        <option value="fullide" ${s.theme === 'fullide' ? 'selected' : ''}>FullIDE (custom dark)</option>
         <option value="classic" ${s.theme === 'classic' ? 'selected' : ''}>Classic (light)</option>
       </select>
     </div>
@@ -2156,7 +2212,7 @@ function aboutDialog() {
       <div style="font-size:34px;font-weight:300">Full<span style="color:var(--accent)">IDE</span></div>
       <div style="color:var(--fg-dim);margin:6px 0 14px">C/C++ IDE for game development</div>
       <div style="text-align:left;font-size:12.5px;line-height:1.7;color:var(--fg-dim)">
-        <div>• CLion-style Darcula UI with VSCode/CLion workflows</div>
+        <div>• Custom FullIDE theme with JetBrains Mono editor text</div>
         <div>• Real toolchain: GCC ${'16'} / Clang 22 / CMake 4 + Ninja / GDB 17</div>
         <div>• Build (Ctrl+F9), Run (Shift+F10), Debug with breakpoints (F5)</div>
         <div>• raylib ${state.tools.raylib ? 'detected — game templates ready' : 'not detected'}</div>
@@ -2200,8 +2256,8 @@ function bindActions() {
   action('settings', 'Settings...', 'Ctrl+Alt+S', settingsDialog);
   action('exit', 'Exit', null, () => { logOut('Close the browser tab to exit FullIDE'); });
 
-  action('undo', 'Undo', 'Ctrl+Z', () => document.execCommand('undo'));
-  action('redo', 'Redo', 'Ctrl+Y', () => document.execCommand('redo'));
+  action('undo', 'Undo', 'Ctrl+Z', () => activeEditor()?.undo());
+  action('redo', 'Redo', 'Ctrl+Y', () => activeEditor()?.redo());
   action('cut', 'Cut', 'Ctrl+X', () => document.execCommand('cut'));
   action('copy', 'Copy', 'Ctrl+C', () => document.execCommand('copy'));
   action('paste', 'Paste', 'Ctrl+V', () => document.execCommand('paste'));
@@ -2313,6 +2369,7 @@ function bindActions() {
 
 async function setRoot(p) {
   if (!p) return;
+  const restartTerminal = !!state.term.id || !!state.term.starting;
   state.root = path.resolve(p);
   $('menu-folder-name').textContent = state.root;
   $('project-title').textContent = path.basename(state.root);
@@ -2340,6 +2397,7 @@ async function setRoot(p) {
   };
   if (state.treeData) walkExpand(state.treeData, '');
   renderTree();
+  if (restartTerminal) await ensureTerminal();
 }
 
 /* ---------------------------------------------------------------- init */

@@ -19,6 +19,11 @@
       this.findMatches = [];
       this.findIdx = -1;
       this.tabSize = 4;
+      this.savedText = '';
+      this.history = [{ text: '', selectionStart: 0, selectionEnd: 0 }];
+      this.historyIndex = 0;
+      this.pendingInput = null;
+      this.lastHistoryGroup = null;
 
       // DOM
       this.el = document.createElement('div');
@@ -63,15 +68,33 @@
 
   _measureCharWidth() {
     const fs = getComputedStyle(this.el).fontSize || '13px';
-    this._measureCtx.font = fs + ' "JetBrains Mono", Consolas, monospace';
+    this._measureCtx.font = fs + ' "JetBrains Mono", monospace';
     return this._measureCtx.measureText('xxxxxxxxxx').width / 10 || 7.8;
   }
 
     _bind() {
       const ta = this.ta;
-      ta.addEventListener('input', () => {
+      ta.addEventListener('beforeinput', (e) => {
+        this.pendingInput = {
+          text: this.text,
+          selectionStart: ta.selectionStart,
+          selectionEnd: ta.selectionEnd,
+          inputType: e.inputType,
+          time: Date.now(),
+        };
+      });
+      ta.addEventListener('input', (e) => {
+        const before = this.pendingInput || {
+          text: this.text,
+          selectionStart: ta.selectionStart,
+          selectionEnd: ta.selectionEnd,
+          inputType: e.inputType,
+          time: Date.now(),
+        };
         this.text = ta.value;
-        this.dirty = true;
+        this._recordHistory(before, e.inputType);
+        this.pendingInput = null;
+        this.dirty = this.text !== this.savedText;
         this._scheduleRender();
         if (this.handlers.onChange) this.handlers.onChange(this);
       });
@@ -106,6 +129,18 @@
     const { selectionStart: s, selectionEnd: en } = ta;
     const settings = (typeof self !== 'undefined' && self.FullIDESettings) || {};
 
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) this.redo();
+      else this.undo();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      this.redo();
+      return;
+    }
+
     if (e.key === 'Tab') {
       e.preventDefault();
       if (e.shiftKey) {
@@ -139,6 +174,11 @@
           e.preventDefault();
           this._replaceRange(s, en, e.key + pairs[e.key]);
           ta.setSelectionRange(s + 1, s + 1);
+          const historyItem = this.history[this.historyIndex];
+          if (historyItem) {
+            historyItem.selectionStart = s + 1;
+            historyItem.selectionEnd = s + 1;
+          }
           return;
         }
       }
@@ -151,12 +191,83 @@
   }
 
     _replaceRange(start, end, text) {
-      this.text = this.text.slice(0, start) + text + this.text.slice(end);
-      this.ta.value = this.text;
-      this.ta.setSelectionRange(start + text.length, start + text.length);
-      this.dirty = true;
+      const before = {
+        text: this.text,
+        selectionStart: this.ta.selectionStart,
+        selectionEnd: this.ta.selectionEnd,
+        time: Date.now(),
+      };
+      const nextText = this.text.slice(0, start) + text + this.text.slice(end);
+      const cursor = start + text.length;
+      this.ta.value = nextText;
+      this.ta.setSelectionRange(cursor, cursor);
+      this.text = nextText;
+      this._recordHistory(before, null);
+      this.dirty = this.text !== this.savedText;
       this._scheduleRender();
       if (this.handlers.onChange) this.handlers.onChange(this);
+    }
+
+    _recordHistory(before, inputType) {
+      if (before.text === this.text) return;
+      const after = {
+        text: this.text,
+        selectionStart: this.ta.selectionStart,
+        selectionEnd: this.ta.selectionEnd,
+      };
+      this.history.splice(this.historyIndex + 1);
+      const canGroup = inputType === 'insertText' &&
+        this.lastHistoryGroup &&
+        Date.now() - this.lastHistoryGroup.time < 1000 &&
+        this.lastHistoryGroup.selectionEnd === before.selectionStart &&
+        before.selectionStart === before.selectionEnd;
+      if (!canGroup && this.historyIndex >= 0) {
+        this.history[this.historyIndex] = {
+          text: before.text,
+          selectionStart: before.selectionStart,
+          selectionEnd: before.selectionEnd,
+        };
+      }
+      if (canGroup && this.historyIndex > 0) {
+        this.history[this.historyIndex] = after;
+      } else {
+        this.history.push(after);
+        this.historyIndex++;
+        if (this.history.length > 100) {
+          this.history.shift();
+          this.historyIndex--;
+        }
+      }
+      this.lastHistoryGroup = inputType === 'insertText'
+        ? { time: Date.now(), selectionEnd: after.selectionEnd }
+        : null;
+    }
+
+    _restoreHistory(index) {
+      const item = this.history[index];
+      if (!item) return;
+      this.historyIndex = index;
+      this.text = item.text;
+      this.ta.value = item.text;
+      this.ta.setSelectionRange(item.selectionStart, item.selectionEnd);
+      this.dirty = this.text !== this.savedText;
+      this.lastHistoryGroup = null;
+      this.pendingInput = null;
+      this._scheduleRender();
+      if (this.handlers.onChange) this.handlers.onChange(this);
+      if (this.handlers.onCursor) this.handlers.onCursor(this);
+    }
+
+    undo() {
+      if (this.historyIndex === 0) return false;
+      this._restoreHistory(this.historyIndex - 1);
+      return true;
+    }
+
+    redo() {
+      if (this.historyIndex >= this.history.length - 1) return false;
+      this._restoreHistory(this.historyIndex + 1);
+      return true;
     }
 
     _scheduleRender() {
@@ -172,6 +283,11 @@
       this.text = text;
       this.path = path || this.path;
       this.ta.value = text;
+      this.savedText = text;
+      this.history = [{ text, selectionStart: 0, selectionEnd: 0 }];
+      this.historyIndex = 0;
+      this.pendingInput = null;
+      this.lastHistoryGroup = null;
       this.dirty = false;
       this.render();
     }
@@ -493,7 +609,10 @@
     focus() { this.ta.focus(); }
 
     isModified() { return this.dirty; }
-    markSaved() { this.dirty = false; }
+    markSaved() {
+      this.savedText = this.text;
+      this.dirty = false;
+    }
 
     dispose() { this.el.remove(); }
   }

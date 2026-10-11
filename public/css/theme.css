@@ -1,39 +1,71 @@
-/* FullIDE — Darcula theme (CLion-style) */
+/* FullIDE — custom dark theme */
 
 :root {
   --ed-fs: 13px;
   --ed-lh: 19px;
-  --bg: #2b2b2b;
-  --bg2: #232323;
-  --bg3: #1e1e1e;
-  --panel: #313335;
-  --panel2: #3c3f41;
-  --border: #3c3f41;
-  --fg: #a9b7c6;
-  --fg-dim: #7f7f7f;
-  --fg-bright: #e8e8e8;
-  --accent: #589df6;
-  --accent-dim: #2b4b7c;
-  --sel: #264f78;
-  --sel-inactive: #353e48;
-  --line: #323232;
-  --caret: #a9b7c6;
-  --kw: #cc7832;
-  --str: #6a8759;
-  --num: #6897bb;
-  --com: #808080;
-  --fn: #ffc66d;
-  --type: #4ec9b0;
-  --macro: #cc7832;
-  --pp: #cc7832;
-  --err: #ff5555;
-  --warn: #ffc66d;
-  --ok: #629755;
-  --gutter-fg: #606360;
-  --tab-inactive: #323232;
-  --tab-active: #2b2b2b;
+  --bg: #171b24;
+  --bg2: #12161e;
+  --bg3: #0e1219;
+  --panel: #202735;
+  --panel2: #2a3445;
+  --border: #303b4d;
+  --fg: #c2cce0;
+  --fg-dim: #8490a5;
+  --fg-bright: #f0f4ff;
+  --accent: #70c7ff;
+  --accent-dim: #244a68;
+  --sel: rgba(65, 147, 220, .42);
+  --sel-inactive: #303a48;
+  --line: #202735;
+  --caret: #e4efff;
+  --kw: #c792ea;
+  --str: #c3e88d;
+  --num: #f78c6c;
+  --com: #78869b;
+  --fn: #82aaff;
+  --type: #89ddff;
+  --macro: #ffcb6b;
+  --pp: #ffcb6b;
+  --err: #ff6b78;
+  --warn: #ffcb6b;
+  --ok: #9bd49b;
+  --gutter-fg: #718098;
+  --tab-inactive: #151a23;
+  --tab-active: #171b24;
   --console-red: #ff6b68;
   --console-green: #629755;
+}
+
+body[data-theme="classic"] {
+  --bg: #f4f6fa;
+  --bg2: #e9edf4;
+  --bg3: #dce2eb;
+  --panel: #ffffff;
+  --panel2: #e2e8f1;
+  --border: #c8d0dc;
+  --fg: #273449;
+  --fg-dim: #66758a;
+  --fg-bright: #101827;
+  --accent: #0879bd;
+  --accent-dim: #c6e4f5;
+  --sel: rgba(45, 133, 198, .35);
+  --sel-inactive: #d8e0e9;
+  --line: #e9edf4;
+  --caret: #17283a;
+  --kw: #8c3fb0;
+  --str: #28734c;
+  --num: #b04a2b;
+  --com: #7b8490;
+  --fn: #245da8;
+  --type: #007f87;
+  --macro: #986500;
+  --pp: #986500;
+  --err: #c5273e;
+  --warn: #946600;
+  --ok: #287a3e;
+  --gutter-fg: #758195;
+  --tab-inactive: #e9edf4;
+  --tab-active: #f4f6fa;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -41,7 +73,7 @@
 html, body, #app { height: 100%; overflow: hidden; }
 
 body {
-  font: 13px "Segoe UI", "JetBrains Mono", Consolas, monospace;
+  font: 13px "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--fg);
   user-select: none;
@@ -178,7 +210,7 @@ body {
 .result-group-h:hover { background: rgba(255,255,255,.04); }
 .result-item {
   padding: 2px 10px 2px 22px; cursor: pointer; display: flex; gap: 8px;
-  font-family: "JetBrains Mono", Consolas, monospace; font-size: 12px;
+  font-family: "JetBrains Mono", monospace; font-size: 12px;
 }
 .result-item:hover { background: var(--sel); }
 .result-item .rline { color: var(--fg-dim); flex: 0 0 38px; text-align: right; }
@@ -217,7 +249,7 @@ body {
 .git-file .gstatus.A { color: var(--ok); } .git-file .gstatus.M { color: var(--warn); }
 .git-file .gstatus.D { color: var(--err); } .git-file .gstatus.? { color: var(--accent); }
 #git-log-list { border-top: 1px solid var(--border); }
-.git-log-item { padding: 2px 10px; color: var(--fg-dim); font-family: Consolas, monospace; font-size: 11.5px; cursor: default; }
+.git-log-item { padding: 2px 10px; color: var(--fg-dim); font-family: "JetBrains Mono", monospace; font-size: 11.5px; cursor: default; }
 .git-log-item .hash { color: var(--fn); }
 
 /* ============ CENTER ============ */
@@ -248,7 +280,7 @@ body {
 .gutter {
   flex: 0 0 auto; width: 56px; background: var(--bg); color: var(--gutter-fg);
   border-right: 1px solid var(--border); overflow: hidden; position: relative;
-  font-family: "JetBrains Mono", Consolas, monospace; text-align: right; padding-right: 8px;
+  font-family: "JetBrains Mono", monospace; text-align: right; padding-right: 8px;
 }
 .gutter .gl {
   height: var(--ed-lh); line-height: var(--ed-lh); font-size: var(--ed-fs); position: relative; cursor: default;
@@ -269,14 +301,14 @@ body {
 .code textarea {
   position: absolute; inset: 0; background: transparent; color: transparent;
   caret-color: var(--caret); border: none; outline: none; resize: none;
-  font-family: "JetBrains Mono", Consolas, monospace; font-size: var(--ed-fs); line-height: var(--ed-lh);
+  font-family: "JetBrains Mono", monospace; font-size: var(--ed-fs); line-height: var(--ed-lh);
   padding: 0 8px 0 8px; white-space: pre; overflow: auto; z-index: 2;
   tab-size: 4; -moz-tab-size: 4;
 }
 .code textarea::selection { background: var(--sel); color: transparent; }
 .code pre {
   position: absolute; inset: 0; margin: 0; overflow: hidden; pointer-events: none; z-index: 1;
-  font-family: "JetBrains Mono", Consolas, monospace; font-size: var(--ed-fs); line-height: var(--ed-lh);
+  font-family: "JetBrains Mono", monospace; font-size: var(--ed-fs); line-height: var(--ed-lh);
   padding: 0 8px 0 8px; white-space: pre; tab-size: 4; -moz-tab-size: 4;
 }
 .code pre .line { display: block; min-height: var(--ed-lh); }
@@ -372,7 +404,7 @@ body {
 .bpane { position: absolute; inset: 0; display: none; flex-direction: column; min-height: 0; }
 .bpane.active { display: flex; }
 .output {
-  flex: 1; overflow: auto; padding: 6px 12px; font-family: "JetBrains Mono", Consolas, monospace;
+  flex: 1; overflow: auto; padding: 6px 12px; font-family: "JetBrains Mono", monospace;
   font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; user-select: text;
 }
 .output .err-text { color: var(--console-red); }
@@ -388,7 +420,7 @@ body {
 #debug-frames { flex: 1; border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; }
 #debug-bps { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .pane-title { padding: 4px 10px; color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--border); }
-.var-item, .frame-item, .bp-item { display: flex; gap: 8px; padding: 2px 10px; font-family: Consolas, monospace; font-size: 12px; }
+.var-item, .frame-item, .bp-item { display: flex; gap: 8px; padding: 2px 10px; font-family: "JetBrains Mono", monospace; font-size: 12px; }
 .var-item .vname { color: var(--fn); } .var-item .vval { color: var(--str); overflow: hidden; text-overflow: ellipsis; }
 .frame-item { cursor: pointer; } .frame-item:hover { background: rgba(255,255,255,.04); }
 .frame-item .floc { color: var(--fg-dim); margin-left: auto; }
@@ -401,10 +433,10 @@ body {
   display: flex; gap: 6px; align-items: center; padding: 4px 12px;
   border-top: 1px solid var(--border); background: #1a1a1a;
 }
-#term-prompt { color: var(--ok); font-family: Consolas, monospace; font-size: 12.5px; }
+#term-prompt { color: var(--ok); font-family: "JetBrains Mono", monospace; font-size: 12.5px; }
 #term-input {
   flex: 1; background: transparent; border: none; outline: none; color: var(--fg-bright);
-  font-family: Consolas, monospace; font-size: 12.5px;
+  font-family: "JetBrains Mono", monospace; font-size: 12.5px;
 }
 
 /* ============ STATUS BAR ============ */

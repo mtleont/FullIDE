@@ -1,6 +1,6 @@
 # FullIDE — C/C++ IDE for Game Development
 
-A complete IDE for C and C++ game development with a **CLion-style Darcula UI** and
+A complete IDE for C and C++ game development with a **custom FullIDE theme** and
 **VSCode/CLion workflows**, powered by a real toolchain (GCC, CMake, Ninja, GDB, raylib).
 
 ## Quick start
@@ -14,7 +14,7 @@ Or double-click **start.bat**.
 
 ## Features
 
-### Editor (CLion look & feel)
+### Editor (FullIDE look & feel)
 - Live C/C++ syntax highlighting (keywords, types, preprocessor, strings, macros)
 - Line numbers, current-line highlight, bracket matching, auto-indent
 - Auto-closing brackets, Tab indentation, comment toggle (Ctrl+/)
@@ -27,7 +27,7 @@ Or double-click **start.bat**.
 - Go to File (Ctrl+P), Go to Symbol (Ctrl+Alt+Shift+N), Go to Line (Ctrl+G)
 - Search Everywhere (double Shift), Go to Definition (F12), Recent Files (Ctrl+E)
 - Breakpoints in the gutter (Ctrl+F8), configurable font size / tab size / minimap
-- Darcula (dark) and Classic (light) themes
+- FullIDE (custom dark) and Classic (light) themes; editor text uses JetBrains Mono
 
 ### Build & Run
 - **Build (Ctrl+F9)** — CMake + Ninja when a `CMakeLists.txt` exists, otherwise
@@ -55,7 +55,8 @@ Or double-click **start.bat**.
   state machine, RAII guards, vector math, singletons
 
 ### Integrated tools
-- **Terminal** (Alt+F12) — real `cmd.exe` with streamed I/O
+- **Terminal** (Alt+F12) — native system shell at the open project root, with streamed I/O.
+  Configure its executable with `FULLIDE_SHELL`; commands use standard input/output (no pseudo-terminal)
 - **Git** (Alt+9) — status, commit, log, init
 - Sidebar / panel resizers, tool window toggles (Alt+1..9)
 - Settings persisted to `~/.fullide/settings.json`
@@ -80,7 +81,7 @@ FullIDE/
 │   templates-data.js       project & file templates (shared server/client)
 └── public/
     ├── index.html          IDE shell (menus, toolbar, sidebar, tabs, panels, dialogs)
-    ├── css/theme.css       Darcula theme
+    ├── css/theme.css       FullIDE and Classic themes
     └── js/
         ├── syntax.js       C/C++ tokenizer
         ├── editor.js       editor widget (highlight overlay, gutter, minimap, find)

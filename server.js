@@ -186,18 +186,62 @@ const termSessions = new Map();
 function startTerm(cwd) {
   const id = 't' + Math.random().toString(36).slice(2, 10);
   const listeners = new Set();
-  const broadcast = (obj) => { for (const fn of listeners) fn(obj); };
-  const proc = cp.spawn('cmd.exe', [], { cwd: cwd || WORKSPACE, env: childEnv([]), windowsHide: false });
+  const output = [];
+  let outputSize = 0;
+  const broadcast = (obj) => {
+    if (obj.type === 'out' || obj.type === 'error') {
+      output.push(obj);
+      outputSize += obj.text.length;
+      while (outputSize > 128 * 1024) outputSize -= output.shift().text.length;
+    }
+    for (const fn of listeners) fn(obj);
+  };
+  const shell = process.env.FULLIDE_SHELL ||
+    (process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/bash'));
+  const shellName = path.basename(shell);
+  const shellArgs = /^(pwsh|powershell)(\.exe)?$/i.test(shellName)
+    ? ['-NoLogo', '-NoProfile', '-NoExit']
+    : [];
+  const resolvedCwd = path.resolve(cwd || WORKSPACE);
+  let proc;
+  try {
+    proc = cp.spawn(shell, shellArgs, {
+      cwd: resolvedCwd,
+      env: childEnv([]),
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    return { error: 'Failed to start terminal shell "' + shell + '": ' + e.message };
+  }
   const session = {
-    id, type: 'term', proc, listeners,
-    write(data) { try { proc.stdin.write(data); } catch (e) {} },
-    stop() { try { proc.kill(); } catch (e) {} },
+    id, type: 'term', proc, listeners, output, shell: shellName, cwd: resolvedCwd, exitMessage: null,
+    write(data) {
+      if (proc.exitCode !== null || proc.stdin.destroyed) return false;
+      proc.stdin.write(data);
+      return true;
+    },
+    stop() {
+      if (proc.exitCode !== null) return;
+      if (process.platform === 'win32' && proc.pid) {
+        try { cp.execFile('taskkill', ['/T', '/F', '/PID', String(proc.pid)], { windowsHide: true }, () => {}); }
+        catch (e) { proc.kill(); }
+      } else {
+        proc.kill();
+      }
+    },
   };
   proc.stdout.on('data', (d) => broadcast({ type: 'out', text: d.toString() }));
   proc.stderr.on('data', (d) => broadcast({ type: 'out', text: d.toString() }));
-  proc.on('close', () => { broadcast({ type: 'exit' }); termSessions.delete(id); });
+  proc.stdin.on('error', (e) => broadcast({ type: 'error', text: 'Terminal input failed: ' + e.message + '\r\n' }));
+  proc.on('error', (e) => broadcast({ type: 'error', text: 'Terminal failed to start: ' + e.message + '\r\n' }));
+  proc.on('close', (code, signal) => {
+    session.exitMessage = { type: 'exit', code, signal };
+    broadcast(session.exitMessage);
+    setTimeout(() => termSessions.delete(id), 60000).unref();
+  });
   termSessions.set(id, session);
-  return { id };
+  return { id, shell: shellName, cwd: resolvedCwd };
 }
 
 /* ----------------------------------------------------------- debug sessions */
@@ -594,7 +638,8 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && pathname === '/api/term') {
     const { cwd } = JSON.parse(await readBody(req));
-    return sendJSON(res, 200, startTerm(cwd));
+    const term = startTerm(cwd);
+    return sendJSON(res, term.error ? 500 : 200, term);
   }
   if (req.method === 'GET' && pathname.startsWith('/api/term/')) {
     const id = pathname.split('/')[3];
@@ -603,19 +648,24 @@ const server = http.createServer(async (req, res) => {
     const send = sse(res);
     s.listeners.add(send);
     res.on('close', () => s.listeners.delete(send));
+    for (const msg of s.output) send(msg);
+    if (s.exitMessage) send(s.exitMessage);
     return;
   }
   if (req.method === 'POST' && pathname.startsWith('/api/term/') && pathname.endsWith('/write')) {
     const id = pathname.split('/')[3];
     const s = termSessions.get(id);
     const { data } = JSON.parse(await readBody(req));
-    if (s) s.write(data);
+    if (!s) return sendJSON(res, 404, { error: 'no terminal session' });
+    if (typeof data !== 'string') return sendJSON(res, 400, { error: 'terminal input must be a string' });
+    if (!s.write(data)) return sendJSON(res, 409, { error: 'terminal process is not accepting input' });
     return sendJSON(res, 200, { ok: true });
   }
   if (req.method === 'POST' && pathname.startsWith('/api/term/') && pathname.endsWith('/kill')) {
     const id = pathname.split('/')[3];
     const s = termSessions.get(id);
-    if (s) s.stop();
+    if (!s) return sendJSON(res, 404, { error: 'no terminal session' });
+    s.stop();
     return sendJSON(res, 200, { ok: true });
   }
 
